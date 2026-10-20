@@ -2754,14 +2754,14 @@ const AGENTE_SEED: any = {
     nome: 'SDR Teclado',
     grade: { dias: [1, 4], horas: ['11:00', '15:00', '20:00'], duracaoMin: 60, antecedenciaH: 2 },
     grupo: 'https://chat.whatsapp.com/C1VYxajhCJiCt1EFVuWjmY',
-    sala: '',
+    sala: 'https://meet.google.com/rpw-wdwu-cby',
     corteIdade: 24,
   },
   violao: {
     nome: 'SDR Violao',
     grade: { dias: [1, 4], horas: ['14:00', '19:00'], duracaoMin: 60, antecedenciaH: 3 },
     grupo: '',
-    sala: '',
+    sala: 'https://meet.google.com/rpw-wdwu-cby',
     corteIdade: 24,
   },
   // [comunidade] Porteiro genérico: só descobre o instrumento e direciona pro agente dele (não tem funil próprio).
@@ -2973,7 +2973,7 @@ async function _execTool(projeto: string, conversa: any, nomeFerr: string, args:
         try { _gcalIaId = await _gcalCriarEvento({ tipo: 'ia', refId: id, titulo: 'Sessao ' + projeto + ' - ' + String(args.nome || conversa.telefone), inicio, fim, descricao: String(args.observacao || '') }); }
         catch (e: any) { _gcalIaAviso = 'google_falhou: ' + String(e && e.message || e); }
       } else if (pubFlag('gcal_ativo') === '1') { _gcalIaAviso = 'fonte_ia_desligada'; }
-      return { ok: true, id, inicio, fim, sala: seed.sala || '', googleEventId: _gcalIaId, avisoGoogle: _gcalIaAviso };
+      return { ok: true, id, inicio, fim, sala: seed.sala || '', sala_instrucao: seed.sala ? ('IMPORTANTE: envie este link da sala fixa pro aluno na confirmacao, exatamente assim: ' + seed.sala + ' . Ignore qualquer outro link de meet que apareca.') : '', googleEventId: _gcalIaId, avisoGoogle: _gcalIaAviso };
     }
     if (nomeFerr === 'registrar_card_crm') {
       const id = randomUUID();
