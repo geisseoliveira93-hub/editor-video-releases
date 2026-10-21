@@ -1974,6 +1974,7 @@ app.post('/f/:id', (req, res) => {
   const email = dados.email;
   if (tel && tel.length >= 10) {
     contatoId = upsertContato(f.projeto, tel, nome, email, 'formulario');
+    try { if (contatoId && (dados.utm_source || dados.utm_campaign || dados.utm_medium || dados.utm_content || dados.utm_term)) { db.prepare(`UPDATE contatos SET utm_source=?, utm_campaign=?, utm_medium=?, utm_content=?, utm_term=?, utm_fbclid=COALESCE(?,utm_fbclid), utm_gclid=COALESCE(?,utm_gclid), utm_primeiro=COALESCE(utm_primeiro,?) WHERE id=?`).run(String(dados.utm_source||''), String(dados.utm_campaign||''), String(dados.utm_medium||''), String(dados.utm_content||''), String(dados.utm_term||''), dados.fbclid?String(dados.fbclid):null, dados.gclid?String(dados.gclid):null, JSON.stringify({s:dados.utm_source||'',c:dados.utm_campaign||'',m:dados.utm_medium||'',ct:dados.utm_content||'',t:dados.utm_term||''}), contatoId); } } catch { /* utm lead best-effort */ }
     if (f.tag) aplicarTag(f.projeto, contatoId, String(f.tag));
     if (contatoId) rodarAutomacoes(f.projeto, 'tag_adicionada', { contatoId, tag: String(f.tag || ''), telefone: tel, nome }).catch(() => {});
   }
@@ -2006,6 +2007,28 @@ try { db.exec(`ALTER TABLE email_dominios ADD COLUMN padrao INTEGER DEFAULT 0`);
 try { db.exec(`ALTER TABLE email_dominios ADD COLUMN warmup_on INTEGER DEFAULT 0`); } catch { /* existe */ }
 try { db.exec(`ALTER TABLE email_dominios ADD COLUMN warmup_inicio TEXT`); } catch { /* existe */ }
 try { db.exec(`ALTER TABLE email_dominios ADD COLUMN warmup_max INTEGER DEFAULT 200`); } catch { /* existe */ }
+// [UTM atribuicao #UTM] colunas add-only p/ ligar lead/venda a campanha/conjunto/anuncio
+try { db.exec(`ALTER TABLE contatos ADD COLUMN utm_source TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE contatos ADD COLUMN utm_campaign TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE contatos ADD COLUMN utm_medium TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE contatos ADD COLUMN utm_content TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE contatos ADD COLUMN utm_term TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE contatos ADD COLUMN utm_fbclid TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE contatos ADD COLUMN utm_gclid TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE contatos ADD COLUMN utm_primeiro TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE transacoes ADD COLUMN utm_source TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE transacoes ADD COLUMN utm_campaign TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE transacoes ADD COLUMN utm_medium TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE transacoes ADD COLUMN utm_content TEXT`); } catch { /* existe */ }
+try { db.exec(`ALTER TABLE transacoes ADD COLUMN utm_term TEXT`); } catch { /* existe */ }
+try { db.exec(`CREATE TABLE IF NOT EXISTS webhook_pagamento_log (id TEXT PRIMARY KEY, provider TEXT, pedido TEXT, raw_json TEXT, criado_em TEXT)`); } catch { /* existe */ }
+function _utmDoPayload(b: any): any {
+  const o: any = {}; if (!b || typeof b !== 'object') return o;
+  const cand = [b, b.utm, b.utms, b.tracking, b.trackingParameters, b.tracking_parameters, b.checkout, b.metadata, b.custom, b.src, (b.transaction||{}), (b.order||{}), (b.data||{})];
+  const keys = ['utm_source','utm_campaign','utm_medium','utm_content','utm_term'];
+  for (const sc of cand) { if (!sc || typeof sc !== 'object') continue; for (const k of keys) { if (!o[k] && sc[k]) o[k] = String(sc[k]).slice(0,300); } }
+  return o;
+}
 try { db.exec(`ALTER TABLE email_fila ADD COLUMN dominio_id TEXT`); } catch { /* existe */ }
 
 // [email] enviador SMTP self-contido (net/tls do Node, sem dependencia nova). Suporta
@@ -2438,6 +2461,7 @@ app.post('/webhook/payment/:provider', async (req, res) => {
     }
     const b = req.body || {};
     const p = normalizaPagamento(provider, b);
+    let _utmVenda: any = null; // [UTM atribuicao #UTM] UTMs resolvidas desta venda (payload ou herdadas do lead)
     // Faturamento: registra/atualiza a venda (upsert por pedido) — NAO depende do dedupe de entrega.
     try {
       const _projT = projetoDoProduto(p.produtoId, p.produtoNome);
@@ -2448,6 +2472,19 @@ app.post('/webhook/payment/:provider', async (req, res) => {
       if (_exT) db.prepare(`UPDATE transacoes SET valor=?, status=?, provider=?, produto=?, contato_id=COALESCE(contato_id,?) WHERE id=?`).run(Number(p.valor || 0), _stF, provider, p.produtoNome || '', _cidT, p.pedido);
       else db.prepare(`INSERT INTO transacoes(id,projeto,contato_id,produto,valor,status,provider,criado_em) VALUES(?,?,?,?,?,?,?,?)`).run(p.pedido, _projT, _cidT, p.produtoNome || '', Number(p.valor || 0), _stF, provider, agora());
     } catch { /* faturamento best-effort */ }
+    // [UTM atribuicao #UTM] log do payload cru + grava UTMs na transacao
+    try { db.prepare(`INSERT OR REPLACE INTO webhook_pagamento_log(id,provider,pedido,raw_json,criado_em) VALUES(?,?,?,?,?)`).run(provider + ':' + String(p.pedido || ''), provider, String(p.pedido || ''), JSON.stringify(b).slice(0, 20000), agora()); } catch { /* log best-effort */ }
+    try {
+      let _u: any = _utmDoPayload(b);
+      if (!_u.utm_source && !_u.utm_campaign) {
+        const _pj = projetoDoProduto(p.produtoId, p.produtoNome);
+        let _ct: any = null;
+        if (p.telefone) _ct = db.prepare(`SELECT utm_source,utm_campaign,utm_medium,utm_content,utm_term FROM contatos WHERE projeto=? AND telefone=? AND utm_source IS NOT NULL`).get(_pj, String(p.telefone).replace(/\D/g,'')) as any;
+        if ((!_ct || !_ct.utm_source) && p.email) _ct = db.prepare(`SELECT utm_source,utm_campaign,utm_medium,utm_content,utm_term FROM contatos WHERE lower(email)=? AND utm_source IS NOT NULL ORDER BY criado_em DESC LIMIT 1`).get(String(p.email).toLowerCase()) as any;
+        if (_ct && _ct.utm_source) _u = _ct;
+      }
+      if (_u && (_u.utm_source || _u.utm_campaign)) { _utmVenda = _u; db.prepare(`UPDATE transacoes SET utm_source=?, utm_campaign=?, utm_medium=?, utm_content=?, utm_term=? WHERE id=?`).run(String(_u.utm_source||''), String(_u.utm_campaign||''), String(_u.utm_medium||''), String(_u.utm_content||''), String(_u.utm_term||''), p.pedido); }
+    } catch { /* utm venda best-effort */ }
 
     // dedupe por pedido
     const ja = db.prepare(`SELECT 1 FROM pagamentos_processados WHERE provider=? AND pedido=?`).get(provider, p.pedido);
@@ -2466,6 +2503,7 @@ app.post('/webhook/payment/:provider', async (req, res) => {
           email: p.email, telefone: p.telefone,
           valorCentavos: Math.round(Number(p.valor || 0) * 100),
           produto: p.produtoNome, produtoId: p.produtoId, evento: _capiEv,
+          utms: _utmVenda,
         }).catch(() => {});
       }
     } catch { /* CAPI best-effort: nunca quebra a entrega */ }
@@ -6651,7 +6689,8 @@ console.log('[etapa28] publicador na nuvem carregado (INERTE ate publicador_ativ
   // (hash SHA-256), fbc/fbp (cookies do clique), IP e user-agent (sem hash) e external_id estável → sobe o EMQ.
   interface CapiDados { email?: string | null; telefone?: string | null; valorCentavos?: number | null; produto?: string | null; pagina?: string | null; eventId?: string | null;
     fbc?: string | null; fbp?: string | null; clientIp?: string | null; userAgent?: string | null;
-    firstName?: string | null; lastName?: string | null; city?: string | null; state?: string | null; zip?: string | null; country?: string | null; externalId?: string | null }
+    firstName?: string | null; lastName?: string | null; city?: string | null; state?: string | null; zip?: string | null; country?: string | null; externalId?: string | null;
+    utms?: any }
   // normaliza + hash SHA-256 (nomes/cidade/UF: minúsculo sem espaço nas bordas; CEP: só dígitos; país: 2 letras).
   const capiHashCampo = (v: string | null | undefined, tipo?: 'zip' | 'pais'): string | undefined => {
     if (v == null) return undefined;
@@ -6740,6 +6779,8 @@ console.log('[etapa28] publicador na nuvem carregado (INERTE ate publicador_ativ
     if (d.valorCentavos != null) { params.currency='BRL'; params.value = Number((d.valorCentavos/100).toFixed(2)); }
     params.transaction_id = d.eventId || randomUUID();
     if (d.produto) params.items = [{ item_name: String(d.produto) }];
+    // [UTM atribuicao #UTM] leva as UTMs de origem no evento Purchase/Lead do GA4 (registre como dimensoes no GA4)
+    if (d.utms) { const _u:any = d.utms; if(_u.utm_source)params.utm_source=String(_u.utm_source); if(_u.utm_campaign)params.utm_campaign=String(_u.utm_campaign); if(_u.utm_medium)params.utm_medium=String(_u.utm_medium); if(_u.utm_content)params.utm_content=String(_u.utm_content); if(_u.utm_term)params.utm_term=String(_u.utm_term); }
     const userData:any = {};
     const em = capiHash(d.email); if (em) userData.sha256_email_address = [em];
     const ph = ga4HashFone(d.telefone); if (ph) userData.sha256_phone_number = [ph];
@@ -6848,7 +6889,7 @@ console.log('[etapa28] publicador na nuvem carregado (INERTE ate publicador_ativ
       if (projT) {
         const cfgT = trackLer(String(projT));
         if (cfgT && cfgT.ativo !== 0 && (cfgT.meta_pixel_id || cfgT.ga4_mid)) {
-          await trackEnviarTudo(cfgT, eventName, { email: dados.email, telefone: dados.telefone, valorCentavos: dados.valorCentavos, produto: dados.produto, pagina: null, externalId: dados.email || dados.telefone || null }, fonte);
+          await trackEnviarTudo(cfgT, eventName, { email: dados.email, telefone: dados.telefone, valorCentavos: dados.valorCentavos, produto: dados.produto, pagina: null, externalId: dados.email || dados.telefone || null, utms: (dados as any).utms || null }, fonte);
           return;
         }
       }
@@ -6993,6 +7034,14 @@ console.log('[etapa28] publicador na nuvem carregado (INERTE ate publicador_ativ
       + 'function getParam(n){try{return new URLSearchParams(location.search).get(n)||"";}catch(e){return "";}}\n'
       + 'var fbclid=getParam("fbclid"),gclid=getParam("gclid");\n'
       + 'if(fbclid){setCk("_mr_fbc","fb.1."+Date.now()+"."+fbclid);} if(gclid){setCk("_mr_gclid",gclid);}\n'
+      + 'var _UK=["utm_source","utm_campaign","utm_medium","utm_content","utm_term"];\n'
+      + 'var _cu={};for(var _i=0;_i<_UK.length;_i++){var _v=getParam(_UK[_i]);if(_v)_cu[_UK[_i]]=_v;}if(fbclid)_cu.fbclid=fbclid;if(gclid)_cu.gclid=gclid;\n'
+      + 'function _rdU(){try{var ck=document.cookie,i=ck.indexOf("_mr_utm=");if(i<0)return {};var s=ck.substring(i+8);var e=s.indexOf(";");if(e>=0)s=s.substring(0,e);return JSON.parse(decodeURIComponent(s)||"{}");}catch(e){return {};}}\n'
+      + 'var _su=_rdU();if(Object.keys(_cu).length){if(!_su.f)_su.f=_cu;_su.l=_cu;_su.ts=Date.now();setCk("_mr_utm",encodeURIComponent(JSON.stringify(_su)));}\n'
+      + 'window.__mrUtm=(_su.l||_su.f||{});\n'
+      + 'window.mrAppendUtm=function(u){try{var U=new URL(u,location.href);var q=window.__mrUtm||{};for(var k in q){if(q[k]&&!U.searchParams.get(k))U.searchParams.set(k,q[k]);}return U.toString();}catch(e){return u;}};\n'
+      + 'function _mrUtmRun(){if(window.__mrUtmRan)return;window.__mrUtmRan=1;try{var q=window.__mrUtm||{};if(!Object.keys(q).length)return;var CKx=/(guru|lastlink|hotmart|kiwify|eduzz|monetizze|cakto|payt|kirvano|clkdmg|checkout|carrinho|comprar|assinar|inscrever)/i;var as=document.querySelectorAll("a[href]");for(var i=0;i<as.length;i++){var h=as[i].getAttribute("href")||"";if(CKx.test(h))as[i].setAttribute("href",window.mrAppendUtm(h));}var fs=document.querySelectorAll("form");for(var j=0;j<fs.length;j++){for(var k in q){if(!q[k])continue;var inp=document.createElement("input");inp.type="hidden";inp.name=k;inp.value=q[k];fs[j].appendChild(inp);}}}catch(e){}}\n'
+      + 'if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",_mrUtmRun);else _mrUtmRun();\n'
       + 'function uuid(){return "xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx".replace(/[xy]/g,function(c){var r=Math.random()*16|0,v=c==="x"?r:(r&0x3|0x8);return v.toString(16);});}\n'
       + 'var MR_PROJ=' + JSON.stringify(projeto) + ',MR_BASE=' + JSON.stringify(base) + ';\n'
       + (metaPixel ? ('!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version="2.0";n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,"script","https://connect.facebook.net/en_US/fbevents.js");fbq("init",' + JSON.stringify(metaPixel) + ');\n') : '')
@@ -7026,6 +7075,27 @@ console.log('[etapa28] publicador na nuvem carregado (INERTE ate publicador_ativ
       }
     } catch { /* best-effort */ }
     res.json({ ok:true });
+  });
+  // [UTM atribuicao #UTM] relatorio campanha -> conjunto -> anuncio (leads, vendas, R$). Separa nome|id.
+  app.get('/track/atribuicao', (req:any, res:any) => {
+    try {
+      const pj = String(req.query.projeto || '') || null;
+      const sep = (v:any) => { const z = String(v||''); const i = z.lastIndexOf('|'); return i>=0 ? { nome: z.slice(0,i), id: z.slice(i+1) } : { nome: z, id: '' }; };
+      const vrows = db.prepare(`SELECT utm_campaign,utm_medium,utm_content,utm_source,COUNT(*) n, COALESCE(SUM(valor),0) receita FROM transacoes WHERE (status='pago' OR status='aprovado' OR status LIKE '%provad%') AND (? IS NULL OR projeto=?) AND utm_campaign IS NOT NULL AND utm_campaign<>'' GROUP BY utm_campaign,utm_medium,utm_content`).all(pj, pj) as any[];
+      const lrows = db.prepare(`SELECT utm_campaign,utm_medium,utm_content,COUNT(*) n FROM contatos WHERE utm_campaign IS NOT NULL AND utm_campaign<>'' AND (? IS NULL OR projeto=?) GROUP BY utm_campaign,utm_medium,utm_content`).all(pj, pj) as any[];
+      const arv:any = {};
+      const node = (r:any) => {
+        const kc=String(r.utm_campaign||''), km=String(r.utm_medium||''), ka=String(r.utm_content||'');
+        const C = arv[kc] || (arv[kc] = { campanha: sep(kc), source: r.utm_source||'', leads:0, vendas:0, receita:0, _cj:{} });
+        const J = C._cj[km] || (C._cj[km] = { conjunto: sep(km), leads:0, vendas:0, receita:0, _an:{} });
+        const A = J._an[ka] || (J._an[ka] = { anuncio: sep(ka), leads:0, vendas:0, receita:0 });
+        return { C, J, A };
+      };
+      for (const r of vrows) { const {C,J,A}=node(r); C.vendas+=r.n; J.vendas+=r.n; A.vendas+=r.n; C.receita+=r.receita; J.receita+=r.receita; A.receita+=r.receita; }
+      for (const r of lrows) { const {C,J,A}=node(r); C.leads+=r.n; J.leads+=r.n; A.leads+=r.n; }
+      const campanhas = Object.values(arv).map((C:any)=>({ campanha:C.campanha, source:C.source, leads:C.leads, vendas:C.vendas, receita:C.receita, conjuntos: Object.values(C._cj).map((J:any)=>({ conjunto:J.conjunto, leads:J.leads, vendas:J.vendas, receita:J.receita, anuncios: Object.values(J._an) })) }));
+      _ndOk(res, { campanhas, totais: { campanhas: campanhas.length } });
+    } catch (e) { _ndErr(res, e); }
   });
   console.log('[#5 rastreio] /track/* carregado — config (Meta CAPI + GA4), snippet.js, testar, evento, alerta');
   console.log('[etapa29] CAPI carregado (INERTE ate capi_ativo=1) — /capi/webhook/:fonte, /capi/pixel, /capi/eventos, /capi/testar');
@@ -10286,9 +10356,10 @@ a{color:inherit;text-decoration:none}
 .hero p{color:#d7d7df;max-width:48ch}
 .shelf{margin:26px 0}
 .shelf h2{font-size:15px;color:#bdbdc8;font-weight:600;margin:0 0 12px}
-.rail{display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;scrollbar-width:thin}
+.rail{display:flex;gap:14px;overflow-x:auto;overflow-y:hidden;padding:14px 16px 18px;scrollbar-width:thin}
 .card{flex:0 0 172px;width:172px}
-.card .pz{position:relative;width:172px;height:244px;border-radius:10px;overflow:hidden;background:#17171f;border:1px solid #23232c}
+.card .pz{position:relative;width:172px;height:244px;border-radius:12px;overflow:hidden;background:#17171f;border:1px solid #23232c;transition:transform .2s cubic-bezier(.2,.7,.3,1),filter .2s,box-shadow .2s,outline-color .2s;outline:2px solid transparent;outline-offset:2px}
+.card{cursor:pointer}.card:hover .pz{transform:translateY(-4px) scale(1.045);filter:brightness(1.12);box-shadow:0 16px 30px -12px #000c;outline-color:#e7c86a}.cattile{transition:transform .2s,border-color .2s}.cattile:hover{transform:translateY(-3px)}
 .card .pz img{width:100%;height:100%;object-fit:cover;display:block}
 .card .pz .lock{position:absolute;inset:0;display:grid;place-items:center;background:#000000a8;font-size:30px}
 .card .pz .pb{position:absolute;left:0;right:0;bottom:0;height:4px;background:#ffffff22}
@@ -10337,7 +10408,8 @@ const _acTop = (al: any, aba = ''): string => {
   const impers = ''; // (admin "entrar como aluno" poderia injetar "voltar"); mantido simples
   return `<div class="top"><a class="logo" href="/area">M|R</a>
     <nav><a href="/area" class="${aba === 'home' ? 'on' : ''}">Início</a>
-    <a href="https://api.whatsapp.com/send?phone=5516996401030" target="_blank">Suporte</a></nav>
+    <a href="https://api.whatsapp.com/send?phone=5516996401030" target="_blank">Suporte</a>
+    <a href="https://melodias-riffs-app.pages.dev/inicio.html?email=${encodeURIComponent(String(al && al.email || ''))}&cuser_fname=${encodeURIComponent(String(al && al.nome || '').trim().split(' ')[0] || '')}" target="_blank">Fale com a IA</a></nav>
     <div class="sp"></div>
     <div class="ic" title="Aumentar a letra" style="font-weight:800;width:auto;padding:0 10px;border:1px solid #2a2a34" onclick="acBig()">A+</div>
     <div class="av" onclick="var m=document.getElementById('mn');m.classList.toggle('open')">${ini}
@@ -10354,7 +10426,7 @@ const _acTop = (al: any, aba = ''): string => {
 };
 const _acPage = (al: any, titulo: string, corpo: string, aba = '', extraHead = ''): string =>
   '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-  + '<title>' + esc(titulo) + ' — Melodias e Riffs</title><link rel="manifest" href="/area/manifest.webmanifest"><meta name="theme-color" content="#0a0a0c"><style>' + _acCSS + '</style>' + extraHead + '<script>function acBig(){try{var h=document.documentElement;h.classList.toggle("ac-big");localStorage.setItem("ac_big",h.classList.contains("ac-big")?"1":"0");}catch(e){}}try{if(localStorage.getItem("ac_big")==="1")document.documentElement.classList.add("ac-big");}catch(e){}if("serviceWorker" in navigator){navigator.serviceWorker.register("/area/sw.js").catch(function(){});}</script></head><body>'
+  + '<title>' + esc(titulo) + ' — Melodias e Riffs</title><link rel="manifest" href="/area/manifest.webmanifest"><meta name="theme-color" content="#0a0a0c"><style>' + _acCSS + '</style>' + extraHead + '<script>function acBig(){try{var h=document.documentElement;h.classList.toggle("ac-big");localStorage.setItem("ac_big",h.classList.contains("ac-big")?"1":"0");}catch(e){}}try{if(localStorage.getItem("ac_big")==="1")document.documentElement.classList.add("ac-big");}catch(e){}if("serviceWorker" in navigator){navigator.serviceWorker.register("/area/sw.js").catch(function(){});}(function(){var AC=null;function mk(){if(!AC){try{AC=new (window.AudioContext||window.webkitAudioContext)();}catch(e){}}if(AC&&AC.state==="suspended")AC.resume();}document.addEventListener("pointerdown",mk);var L=0;document.addEventListener("mouseover",function(e){var c=e.target&&e.target.closest&&e.target.closest(".card,.cattile,.mcard");if(!c||!AC)return;var n=Date.now();if(n-L<90)return;L=n;try{var t=AC.currentTime,o=AC.createOscillator(),g=AC.createGain();o.type="sine";o.frequency.setValueAtTime(820,t);o.frequency.exponentialRampToValueAtTime(1240,t+.05);g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.03,t+.012);g.gain.exponentialRampToValueAtTime(.0001,t+.12);o.connect(g).connect(AC.destination);o.start(t);o.stop(t+.13);}catch(e){}},true);})();</script></head><body>'
   + _acTop(al, aba) + corpo + '</body></html>';
 
 // ---------- [B.3] Login / magic link / logout ----------
@@ -10427,7 +10499,8 @@ app.get(['/area', '/area/vitrine/home'], (req: any, res: any) => {
     const emAndamento = cursos.filter((c) => meus.has(c.id) && (pmap[c.id] || 0) > 0 && (pmap[c.id] || 0) < 100);
     const cats: string[] = []; for (const v of vitrines) { const ct = String(v.categoria || '').trim(); if (ct && !cats.includes(ct)) cats.push(ct); }
     let shelves = '';
-    if (emAndamento.length) shelves += `<div class="shelf"><h2>Continuar assistindo</h2><div class="rail">${emAndamento.map(cardHtml).join('')}</div></div>`;
+    // [Ezequias 21/10: "Continuar assistindo" NAO fica na home — fica DENTRO do curso. Removido da home:]
+    // if (emAndamento.length) shelves += `<div class="shelf"><h2>Continuar assistindo</h2><div class="rail">${emAndamento.map(cardHtml).join('')}</div></div>`;
     const novos = cursos.filter((c) => c.criado_em && c.criado_em >= new Date(Date.now() - 30 * 864e5).toISOString());
     if (novos.length) shelves += `<div class="shelf"><h2>✨ Novidades</h2><div class="rail">${novos.map(cardHtml).join('')}</div></div>`;
     const _catMeta = _acCatMeta();
@@ -10889,6 +10962,40 @@ app.post('/academy/importar/alunos', (req: any, res: any) => {
     });
     tx(linhas);
     _ndOk(res, { novos, atualizados, acessos, total: linhas.length });
+  } catch (e) { _ndErr(res, e); }
+});
+
+// [ADD entregas] Importacao de ENTREGAS (relatorio Cademi aluno->produto->estado) — ADITIVO/SEGURO.
+// So ADICIONA acesso NOVO (curso que o aluno ainda nao tem) com validade 'vitalicio'; NUNCA apaga
+// nem sobrescreve acesso existente (preserva as datas reais / tempo restante). Curso ja existente
+// -> ignora. Curso expirado/desativado que o aluno nao tem -> nao concede. Re-rodavel sem duplicar.
+// Corpo: { alunos:[{ email, nome, cursos:[[curso_id, estado], ...] }] }  (estado: valido|expirado|desativado)
+app.post('/academy/importar/entregas', (req: any, res: any) => {
+  try {
+    const b = req.body || {};
+    const alunos: any[] = Array.isArray(b.alunos) ? b.alunos : [];
+    let novos = 0, atualizados = 0, acessos = 0, ignorados = 0;
+    const tx = db.transaction((lista: any[]) => {
+      for (const a of lista) {
+        const email = String((a && a.email) || '').trim().toLowerCase(); if (!email) continue;
+        let al = db.prepare(`SELECT id, nome FROM academy_matriculas WHERE lower(email)=?`).get(email) as any;
+        let id = al && al.id;
+        if (!al) { id = randomUUID(); const tok = _acToken(); db.prepare(`INSERT INTO academy_matriculas (id,nome,email,token_login,ativo,criado_em) VALUES (?,?,?,?,1,?)`).run(id, String((a && a.nome) || ''), email, tok, agora()); novos++; }
+        else { if (a && a.nome && !al.nome) db.prepare(`UPDATE academy_matriculas SET nome=? WHERE id=?`).run(String(a.nome), id); atualizados++; }
+        const tem = new Set((db.prepare(`SELECT alvo_id FROM academy_acesso WHERE aluno_id=? AND alvo_tipo='curso'`).all(id) as any[]).map((x: any) => String(x.alvo_id)));
+        const cursos: any[] = Array.isArray(a && a.cursos) ? a.cursos : [];
+        for (const c of cursos) {
+          const cid = String((Array.isArray(c) ? c[0] : (c && c.curso_id)) || '');
+          const est = String((Array.isArray(c) ? c[1] : (c && c.estado)) || 'valido');
+          if (!cid) continue;
+          if (tem.has(cid)) { ignorados++; continue; }
+          if (est === 'expirado' || est === 'desativado') { ignorados++; continue; }
+          db.prepare(`INSERT INTO academy_acesso (id,aluno_id,alvo_tipo,alvo_id,validade,criado_em) VALUES (?,?,?,?,?,?)`).run(randomUUID(), id, 'curso', cid, 'vitalicio', agora()); acessos++; tem.add(cid);
+        }
+      }
+    });
+    tx(alunos);
+    _ndOk(res, { novos, atualizados, acessos_novos: acessos, ignorados, total: alunos.length });
   } catch (e) { _ndErr(res, e); }
 });
 
