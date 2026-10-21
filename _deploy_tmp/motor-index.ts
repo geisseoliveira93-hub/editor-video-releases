@@ -11544,4 +11544,38 @@ app.get('/academy/alunos/busca', (req: any, res: any) => {
   } catch (e) { _ndErr(res, e); }
 });
 
+// ---------- [B.14] MATERIAIS (PDF/áudio) — listar pendentes + anexar arquivo por URL ----------
+// ADITIVO. Suporta a re-hospedagem dos materiais que vieram vazios da migração.
+// GET /academy/materiais/pendentes — lista as aulas tipo 'material' (e as sem anexo), com caminho curso/módulo.
+app.get('/academy/materiais/pendentes', (_req: any, res: any) => {
+  try {
+    const rows = db.prepare(`
+      SELECT a.id aula_id, a.nome aula_nome, a.tipo, a.anexos, a.curso_id,
+             c.nome curso_nome, m.id modulo_id, m.nome modulo_nome, m.ordem modulo_ordem
+      FROM academy_aulas a
+      LEFT JOIN academy_cursos c ON c.id = a.curso_id
+      LEFT JOIN academy_modulos m ON m.id = a.modulo_id
+      WHERE a.tipo = 'material'
+      ORDER BY c.nome, m.ordem, a.ordem`).all() as any[];
+    const out = rows.map((r) => { let an: any[] = []; try { an = JSON.parse(r.anexos || '[]'); } catch { an = []; } return {
+      aula_id: r.aula_id, aula_nome: r.aula_nome, curso_id: r.curso_id, curso_nome: r.curso_nome || '',
+      modulo_id: r.modulo_id, modulo_nome: r.modulo_nome || '', tem_anexo: an.length > 0, n_anexos: an.length }; });
+    _ndOk(res, { total: out.length, com_anexo: out.filter((x) => x.tem_anexo).length, sem_anexo: out.filter((x) => !x.tem_anexo).length, materiais: out });
+  } catch (e) { _ndErr(res, e); }
+});
+// POST /academy/aula/anexo { aula_id, nome, url, tamanho? } — acrescenta 1 anexo (não duplica a mesma url).
+app.post('/academy/aula/anexo', (req: any, res: any) => {
+  try {
+    const b = req.body || {};
+    const aulaId = String(b.aula_id || ''); const url = String(b.url || ''); const nome = String(b.nome || 'Arquivo');
+    if (!aulaId || !url) return _ndErr(res, 'aula_id e url obrigatórios');
+    const a = db.prepare(`SELECT id, anexos FROM academy_aulas WHERE id=?`).get(aulaId) as any;
+    if (!a) return _ndErr(res, 'aula nao encontrada');
+    let an: any[] = []; try { an = JSON.parse(a.anexos || '[]'); } catch { an = []; }
+    if (!an.some((x: any) => x && x.url === url)) an.push({ nome, url, tamanho: String(b.tamanho || '') });
+    db.prepare(`UPDATE academy_aulas SET anexos=? WHERE id=?`).run(JSON.stringify(an), aulaId);
+    _ndOk(res, { aula_id: aulaId, anexos: an });
+  } catch (e) { _ndErr(res, e); }
+});
+
 app.listen(PORT, () => console.log(`[engine] ouvindo na porta ${PORT} — base ${PUBLIC_BASE_URL}`));
