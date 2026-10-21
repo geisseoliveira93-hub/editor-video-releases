@@ -696,6 +696,7 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/.well-known/oauth')) return next(); // [MCP OAuth] metadata de descoberta
   if (req.path.startsWith('/oauth/')) return next(); // [MCP OAuth] authorize/token/register (gate pela MCP_API_KEY)
   if (req.path === '/area' || req.path.startsWith('/area/')) return next(); // [B] area de membros (auth propria por cookie)
+  if (req.path === '/academy/audio-push') return next(); // [B.16] upload de audio da aula — gate por AUDIO_PUSH_TOKEN (nao usa ENGINE_API_KEY)
   const ip = ipDoReq(req);
   const agora2 = Date.now();
   const reg = falhasAuth.get(ip);
@@ -11638,6 +11639,42 @@ app.get('/academy/aulas/audio-pendentes', (req: any, res: any) => {
       : db.prepare(base + ` ORDER BY c.nome, a.ordem`).all()) as any[];
     _ndOk(res, { total: rows.length, aulas: rows });
   } catch (e) { _ndErr(res, e); }
+});
+
+// ---------- [B.16] UPLOAD DE ÁUDIO DA AULA (direto do PC do Ezequias via .bat) ----------
+// ADITIVO. O .bat extrai o áudio (yt-dlp, IP residencial) e faz POST do binário aqui.
+// Gate por AUDIO_PUSH_TOKEN (env no VPS) — NÃO expõe a ENGINE_API_KEY. Rota isenta do x-api-key.
+// POST /academy/audio-push?token=&aula_id=&ext=  body = bytes do áudio (Content-Type livre).
+app.post('/academy/audio-push', express.raw({ type: () => true, limit: '200mb' }), (req: any, res: any) => {
+  try {
+    const tok = process.env.AUDIO_PUSH_TOKEN || '';
+    if (!tok || String(req.query.token || '') !== tok) return res.status(403).json({ erro: 'token_invalido' });
+    const aulaId = String(req.query.aula_id || '');
+    if (!aulaId) return res.status(400).json({ erro: 'aula_id' });
+    const a = db.prepare(`SELECT id FROM academy_aulas WHERE id=?`).get(aulaId) as any;
+    if (!a) return res.status(404).json({ erro: 'aula_nao_encontrada' });
+    const buf: Buffer = req.body;
+    if (!buf || !buf.length) return res.status(400).json({ erro: 'corpo_vazio' });
+    const ext = (String(req.query.ext || 'm4a').replace(/[^a-z0-9]/gi, '').slice(0, 5)) || 'm4a';
+    try { fs.mkdirSync(AC_AUDIO_DIR, { recursive: true }); } catch { /* ok */ }
+    const nome = aulaId + '.' + ext;
+    fs.writeFileSync(AC_AUDIO_DIR + '/' + nome, buf);
+    const url = (PUBLIC_BASE_URL || '') + '/media/academy/audio/' + nome;
+    db.prepare(`UPDATE academy_aulas SET audio_url=? WHERE id=?`).run(url, aulaId);
+    res.json({ ok: true, aula_id: aulaId, bytes: buf.length, audio_url: url });
+  } catch (e: any) { res.status(500).json({ erro: String((e && e.message) || e) }); }
+});
+
+// GET lista p/ o .bat: "aula_id,youtube_id" das aulas de vídeo (YouTube) ainda SEM áudio. Gate por token.
+app.get('/academy/audio-push/lista', (req: any, res: any) => {
+  try {
+    const tok = process.env.AUDIO_PUSH_TOKEN || '';
+    if (!tok || String(req.query.token || '') !== tok) return res.status(403).type('text/plain').send('token_invalido');
+    const rows = db.prepare(`SELECT id, video_ref FROM academy_aulas
+      WHERE tipo='video' AND video_fonte='youtube' AND video_ref<>'' AND (audio_url IS NULL OR audio_url='')
+      ORDER BY curso_id, ordem`).all() as any[];
+    res.type('text/plain').send(rows.map((r) => r.id + ',' + r.video_ref).join('\n'));
+  } catch (e: any) { res.status(500).type('text/plain').send(String((e && e.message) || e)); }
 });
 
 app.listen(PORT, () => console.log(`[engine] ouvindo na porta ${PORT} — base ${PUBLIC_BASE_URL}`));
