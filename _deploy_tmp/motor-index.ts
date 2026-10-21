@@ -11489,8 +11489,10 @@ app.get('/academy/aluno/:id/acessos', (req: any, res: any) => {
 // ADITIVO. Lista pesquisável/paginada de alunos com resumo de acesso por aluno (vitalício/ativo/expirado/sem acesso),
 // tempo restante do curso que vence primeiro e contadores gerais. Reaproveita db, app, _acTempoAcesso, _ndOk/_ndErr.
 const _acStatusAluno = (accs: any[]): any => {
-  let nVit = 0, nAtivo = 0, nExp = 0; let restMin: number | null = null; let proxExp: string | null = null; let proxCurso: string | null = null;
+  let nVit = 0, nAtivo = 0, nExp = 0; let restMin: number | null = null; let proxExp: string | null = null; let proxCurso: string | null = null; let entrada: string | null = null;
   for (const a of accs) {
+    const ini = String((a && a.inicio) || '').trim();
+    if (ini && (entrada === null || ini < entrada)) entrada = ini;
     const t = _acTempoAcesso(a);
     if (t.vitalicio) { nVit++; continue; }
     if (t.expirado) { nExp++; continue; }
@@ -11504,7 +11506,7 @@ const _acStatusAluno = (accs: any[]): any => {
   if (status === 'vitalicio') resumo = 'Vitalício' + (nAtivo || nExp ? ' (+' + (nAtivo + nExp) + ')' : '');
   else if (status === 'ativo') resumo = (restMin !== null ? (restMin + ' dias restantes') : 'Ativo') + (n > 1 ? ' · ' + n + ' cursos' : '');
   else if (status === 'expirado') resumo = 'Expirado' + (nExp > 1 ? ' (' + nExp + ' cursos)' : '');
-  return { status, n_cursos: n, n_vitalicio: nVit, n_ativos: nAtivo, n_expirados: nExp, restante_min: restMin, proximo_expira: proxExp, proximo_curso: proxCurso, resumo };
+  return { status, n_cursos: n, n_vitalicio: nVit, n_ativos: nAtivo, n_expirados: nExp, restante_min: restMin, proximo_expira: proxExp, proximo_curso: proxCurso, entrada, resumo };
 };
 // GET /academy/alunos/busca?q=&status=&curso=&page=&limit=&sort=
 // status: ''|'vitalicio'|'ativo'|'expirado'|'sem_acesso'  ·  sort: 'nome'(def)|'recente'|'expira'
@@ -11532,7 +11534,8 @@ app.get('/academy/alunos/busca', (req: any, res: any) => {
     if (q) linhas = linhas.filter((l) => l.nome.toLowerCase().includes(q) || l.email.toLowerCase().includes(q));
     if (fStatus) linhas = linhas.filter((l) => l.status === fStatus);
     if (fCurso) linhas = linhas.filter((l) => l.cursos.indexOf(fCurso) >= 0);
-    if (sort === 'recente') linhas.sort((a, b) => String(b.criado_em || '').localeCompare(String(a.criado_em || '')));
+    if (sort === 'recente') linhas.sort((a, b) => String(b.entrada || '').localeCompare(String(a.entrada || '')));
+    else if (sort === 'antigo') linhas.sort((a, b) => String(a.entrada || '9999').localeCompare(String(b.entrada || '9999')));
     else if (sort === 'expira') linhas.sort((a, b) => { const ax = a.restante_min === null ? 1e9 : a.restante_min; const bx = b.restante_min === null ? 1e9 : b.restante_min; return ax - bx; });
     else linhas.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
     const total = linhas.length; const pages = Math.max(1, Math.ceil(total / limit));
