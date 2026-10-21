@@ -11485,4 +11485,60 @@ app.get('/academy/aluno/:id/acessos', (req: any, res: any) => {
   } catch (e) { _ndErr(res, e); }
 });
 
+// ---------- [B.13] PAINEL ADMIN — BUSCA DE ALUNOS com status de acesso + tempo restante ----------
+// ADITIVO. Lista pesquisável/paginada de alunos com resumo de acesso por aluno (vitalício/ativo/expirado/sem acesso),
+// tempo restante do curso que vence primeiro e contadores gerais. Reaproveita db, app, _acTempoAcesso, _ndOk/_ndErr.
+const _acStatusAluno = (accs: any[]): any => {
+  let nVit = 0, nAtivo = 0, nExp = 0; let restMin: number | null = null; let proxExp: string | null = null; let proxCurso: string | null = null;
+  for (const a of accs) {
+    const t = _acTempoAcesso(a);
+    if (t.vitalicio) { nVit++; continue; }
+    if (t.expirado) { nExp++; continue; }
+    nAtivo++;
+    if (typeof t.restante_dias === 'number' && (restMin === null || t.restante_dias < restMin)) { restMin = t.restante_dias; proxExp = t.expira || null; proxCurso = a.curso_nome || a.alvo_id || null; }
+  }
+  const n = accs.length;
+  let status = 'sem_acesso';
+  if (nVit > 0) status = 'vitalicio'; else if (nAtivo > 0) status = 'ativo'; else if (nExp > 0) status = 'expirado';
+  let resumo = 'Sem acesso';
+  if (status === 'vitalicio') resumo = 'Vitalício' + (nAtivo || nExp ? ' (+' + (nAtivo + nExp) + ')' : '');
+  else if (status === 'ativo') resumo = (restMin !== null ? (restMin + ' dias restantes') : 'Ativo') + (n > 1 ? ' · ' + n + ' cursos' : '');
+  else if (status === 'expirado') resumo = 'Expirado' + (nExp > 1 ? ' (' + nExp + ' cursos)' : '');
+  return { status, n_cursos: n, n_vitalicio: nVit, n_ativos: nAtivo, n_expirados: nExp, restante_min: restMin, proximo_expira: proxExp, proximo_curso: proxCurso, resumo };
+};
+// GET /academy/alunos/busca?q=&status=&curso=&page=&limit=&sort=
+// status: ''|'vitalicio'|'ativo'|'expirado'|'sem_acesso'  ·  sort: 'nome'(def)|'recente'|'expira'
+app.get('/academy/alunos/busca', (req: any, res: any) => {
+  try {
+    const q = String((req.query.q || '')).trim().toLowerCase();
+    const fStatus = String((req.query.status || '')).trim().toLowerCase();
+    const fCurso = String((req.query.curso || '')).trim();
+    const sort = String((req.query.sort || 'nome')).trim().toLowerCase();
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
+    // Carrega tudo uma vez (3k alunos / 14k acessos = rápido no SQLite).
+    const alunos = db.prepare(`SELECT id,nome,email,criado_em FROM academy_matriculas`).all() as any[];
+    const accsAll = db.prepare(`SELECT a.aluno_id, a.alvo_id, a.validade, a.inicio, c.nome curso_nome FROM academy_acesso a LEFT JOIN academy_cursos c ON c.id=a.alvo_id WHERE a.alvo_tipo='curso'`).all() as any[];
+    const tagRows = db.prepare(`SELECT at.aluno_id, t.nome FROM academy_aluno_tags at JOIN academy_tags t ON t.id=at.tag_id`).all() as any[];
+    const accMap: Record<string, any[]> = {}; for (const a of accsAll) { (accMap[a.aluno_id] = accMap[a.aluno_id] || []).push(a); }
+    const tagMap: Record<string, string[]> = {}; for (const t of tagRows) { (tagMap[t.aluno_id] = tagMap[t.aluno_id] || []).push(t.nome); }
+    const cont = { total: alunos.length, vitalicio: 0, ativo: 0, expirado: 0, sem_acesso: 0 };
+    let linhas = alunos.map((al) => {
+      const accs = accMap[al.id] || [];
+      const st = _acStatusAluno(accs);
+      cont[st.status as 'vitalicio']++;
+      return { id: al.id, nome: al.nome || '', email: al.email || '', criado_em: al.criado_em || null, tags: tagMap[al.id] || [], cursos: accs.map((a) => a.alvo_id), ...st };
+    });
+    if (q) linhas = linhas.filter((l) => l.nome.toLowerCase().includes(q) || l.email.toLowerCase().includes(q));
+    if (fStatus) linhas = linhas.filter((l) => l.status === fStatus);
+    if (fCurso) linhas = linhas.filter((l) => l.cursos.indexOf(fCurso) >= 0);
+    if (sort === 'recente') linhas.sort((a, b) => String(b.criado_em || '').localeCompare(String(a.criado_em || '')));
+    else if (sort === 'expira') linhas.sort((a, b) => { const ax = a.restante_min === null ? 1e9 : a.restante_min; const bx = b.restante_min === null ? 1e9 : b.restante_min; return ax - bx; });
+    else linhas.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    const total = linhas.length; const pages = Math.max(1, Math.ceil(total / limit));
+    const pag = linhas.slice((page - 1) * limit, (page - 1) * limit + limit).map((l) => { const { cursos, ...rest } = l; return rest; });
+    _ndOk(res, { total, page, pages, limit, contagem: cont, alunos: pag });
+  } catch (e) { _ndErr(res, e); }
+});
+
 app.listen(PORT, () => console.log(`[engine] ouvindo na porta ${PORT} — base ${PUBLIC_BASE_URL}`));
