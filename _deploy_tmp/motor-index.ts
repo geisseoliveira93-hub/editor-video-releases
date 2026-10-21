@@ -10562,9 +10562,15 @@ app.get('/area/aula/:id', (req: any, res: any) => {
       <div id="qok" style="display:none;color:#9ff0c0;margin-top:12px">✅ Dúvida enviada! O professor vai responder.</div>
     </div></div>`;
 
+    // [B.15] player de ÁUDIO inline embaixo do vídeo (modo audiolivro) — toca dentro da plataforma
+    const audioUrl = (aula as any).audio_url || '';
+    const audioHtml = audioUrl ? `<div class="card2" style="margin:12px 0;padding:12px 14px">
+      <div style="font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px">🎧 Ouça esta aula <span style="color:#8a8a96;font-weight:400;font-size:12.5px">(áudio da aula — toque e ouça aqui mesmo)</span></div>
+      <audio controls preload="none" controlsList="nodownload" style="width:100%;outline:none" src="${esc(audioUrl)}"></audio>
+    </div>` : '';
     const corpo = `<div class="wrap"><div style="color:#8a8a96;font-size:13px;margin:16px 0 4px"><a href="/area/curso/${curso.id}">${esc(curso.nome || '')}</a></div>
       <div class="layoutaula">
-        <div>${miolo}
+        <div>${miolo}${audioHtml}
           <div class="aulahead"><h1>${esc(aula.nome || '')}</h1>
             <span class="pill ${isFav ? 'on' : ''}" id="fvpill" onclick="acFav('${aula.id}')">${isFav ? '★ Favorita' : '☆ Favoritar'}</span>
             <span class="pill ${visto ? 'on' : ''}" id="vpill" onclick="acVisto('${aula.id}','${curso.id}')">${visto ? '✓ Concluída' : 'Marcar como vista'}</span>
@@ -11575,6 +11581,62 @@ app.post('/academy/aula/anexo', (req: any, res: any) => {
     if (!an.some((x: any) => x && x.url === url)) an.push({ nome, url, tamanho: String(b.tamanho || '') });
     db.prepare(`UPDATE academy_aulas SET anexos=? WHERE id=?`).run(JSON.stringify(an), aulaId);
     _ndOk(res, { aula_id: aulaId, anexos: an });
+  } catch (e) { _ndErr(res, e); }
+});
+
+// ---------- [B.15] ÁUDIO DA AULA (modo audiolivro) — player inline embaixo do vídeo ----------
+// ADITIVO. Coluna audio_url + endpoints p/ ligar o áudio extraído (yt-dlp) do próprio vídeo.
+// Convenção: o arquivo de áudio é salvo em /data/media/academy/audio/<aula_id>.<ext> e servido em
+// /media/academy/audio/<aula_id>.<ext>. O /academy/aula/audio/auto varre o disco e liga sozinho.
+try { db.exec(`ALTER TABLE academy_aulas ADD COLUMN audio_url TEXT`); } catch { /* ja existe */ }
+const AC_AUDIO_DIR = MEDIA_DIR + '/academy/audio';
+try { fs.mkdirSync(AC_AUDIO_DIR, { recursive: true }); } catch { /* ok */ }
+// Liga 1 áudio manualmente numa aula.
+app.post('/academy/aula/audio', (req: any, res: any) => {
+  try {
+    const b = req.body || {}; const aulaId = String(b.aula_id || ''); const url = String(b.url || '');
+    if (!aulaId) return _ndErr(res, 'aula_id obrigatório');
+    const a = db.prepare(`SELECT id FROM academy_aulas WHERE id=?`).get(aulaId) as any;
+    if (!a) return _ndErr(res, 'aula nao encontrada');
+    db.prepare(`UPDATE academy_aulas SET audio_url=? WHERE id=?`).run(url, aulaId);
+    _ndOk(res, { aula_id: aulaId, audio_url: url });
+  } catch (e) { _ndErr(res, e); }
+});
+// Varre /data/media/academy/audio e liga em cada aula cujo arquivo <aula_id>.<ext> existe.
+// body opcional { curso_id, substituir }. Idempotente.
+app.post('/academy/aula/audio/auto', (req: any, res: any) => {
+  try {
+    const b = req.body || {}; const cursoFiltro = String(b.curso_id || ''); const substituir = !!b.substituir;
+    let arqs: string[] = []; try { arqs = fs.readdirSync(AC_AUDIO_DIR); } catch { arqs = []; }
+    const base = (PUBLIC_BASE_URL || '') + '/media/academy/audio/';
+    let ligados = 0, pulados = 0;
+    const tx = db.transaction((lista: string[]) => {
+      for (const f of lista) {
+        const m = f.match(/^([0-9a-f-]{8,})\.(\w{2,5})$/i); if (!m) continue;
+        const aulaId = m[1];
+        const a = db.prepare(`SELECT id, curso_id, audio_url FROM academy_aulas WHERE id=?`).get(aulaId) as any;
+        if (!a) { pulados++; continue; }
+        if (cursoFiltro && a.curso_id !== cursoFiltro) { pulados++; continue; }
+        if (a.audio_url && !substituir) { pulados++; continue; }
+        db.prepare(`UPDATE academy_aulas SET audio_url=? WHERE id=?`).run(base + f, aulaId);
+        ligados++;
+      }
+    });
+    tx(arqs);
+    _ndOk(res, { arquivos: arqs.length, ligados, pulados });
+  } catch (e) { _ndErr(res, e); }
+});
+// Lista as aulas de VÍDEO que ainda não têm áudio (alvos da extração). ?curso_id= opcional.
+app.get('/academy/aulas/audio-pendentes', (req: any, res: any) => {
+  try {
+    const cursoId = String(req.query.curso_id || '');
+    const base = `SELECT a.id aula_id, a.nome aula_nome, a.video_ref, a.video_fonte, a.curso_id, c.nome curso_nome
+      FROM academy_aulas a LEFT JOIN academy_cursos c ON c.id=a.curso_id
+      WHERE a.tipo='video' AND a.video_ref<>'' AND (a.audio_url IS NULL OR a.audio_url='')`;
+    const rows = (cursoId
+      ? db.prepare(base + ` AND a.curso_id=? ORDER BY a.ordem`).all(cursoId)
+      : db.prepare(base + ` ORDER BY c.nome, a.ordem`).all()) as any[];
+    _ndOk(res, { total: rows.length, aulas: rows });
   } catch (e) { _ndErr(res, e); }
 });
 
