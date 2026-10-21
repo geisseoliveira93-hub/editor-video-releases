@@ -10470,7 +10470,7 @@ app.get('/area/curso/:id', (req: any, res: any) => {
     }).join('');
     const corpo = `<div class="wrap">
       <div class="coverhero"><div class="bg" style="background-image:url('${esc(curso.capa || '')}')"></div>
-        <div class="in"><div class="meta">${mods.length} módulos · ${nAulas} aulas · ${nFeitas}/${nAulas} concluídas</div>
+        <div class="in"><div class="meta">${mods.length} módulos · ${nAulas} aulas · ${nFeitas}/${nAulas} concluídas${_acTempoCursoHtml(al.id, curso.id)}</div>
         <h1>${esc(curso.nome || '')}</h1>
         ${prox ? `<a class="btn btn-l" href="/area/aula/${prox.id}">${nFeitas ? 'Continuar de onde parei' : 'Começar'}</a>` : ''}</div></div>
       ${nAulas > 0 && nFeitas >= nAulas ? `<div class="card2" style="border:1px solid #e7c86a;margin-bottom:14px;display:flex;align-items:center;gap:12px"><span style="font-size:24px">\u{1F3C6}</span><div style="flex:1">Você concluiu este curso!</div><a class="btn btn-g" href="/area/certificado/${curso.id}">Ver certificado</a></div>` : ''}
@@ -11405,5 +11405,84 @@ app.post('/academy/mapa', (req: any, res: any) => { try { const b = req.body || 
 app.post('/academy/mapa/remover', (req: any, res: any) => { try { db.prepare(`DELETE FROM academy_produto_curso WHERE id=?`).run((req.body || {}).id); _ndOk(res, { removido: true }); } catch (e) { _ndErr(res, e); } });
 
 // ===================== FIM DO LOTE B =====================
+
+// ---------- [B.12] MIGRAÇÃO DE ALUNOS v2 — acesso com INÍCIO + validade por curso + TEMPO RESTANTE ----------
+// ADITIVO. Só adiciona coluna/rotas/helpers; não altera nada existente. Reaproveita db, app, agora(),
+// randomUUID, _ndOk/_ndErr, _acToken, _acValida.
+try { db.exec(`ALTER TABLE academy_acesso ADD COLUMN inicio TEXT`); } catch { /* coluna já existe */ }
+
+// Calcula o tempo de acesso (total/restante em dias) de um registro de academy_acesso.
+const _acTempoAcesso = (ac: any): any => {
+  try {
+    const val = String((ac && ac.validade) || '');
+    if (!val || val.toLowerCase() === 'vitalicio') return { vitalicio: true, texto: 'Vitalício' };
+    const exp = new Date(val + 'T23:59:59'); if (isNaN(exp.getTime())) return { vitalicio: true, texto: 'Vitalício' };
+    const ini = ac.inicio ? new Date(String(ac.inicio) + 'T00:00:00') : null;
+    const dia = 86400000;
+    const restante = Math.ceil((exp.getTime() - Date.now()) / dia);
+    const total = ini ? Math.round((exp.getTime() - ini.getTime()) / dia) : null;
+    const expirado = restante < 0;
+    const brExp = val.split('-').reverse().join('/');
+    const texto = expirado ? ('Expirado em ' + brExp)
+      : (total ? (restante + ' de ' + total + ' dias') : (restante + ' dias restantes'));
+    return { vitalicio: false, inicio: ac.inicio || null, expira: val, total_dias: total, restante_dias: restante, expirado, texto };
+  } catch { return { vitalicio: true, texto: '' }; }
+};
+// HTML curtinho do tempo de acesso de um curso pra um aluno (usado na página do curso do aluno).
+const _acTempoCursoHtml = (alunoId: string, cursoId: string): string => {
+  try {
+    const a = db.prepare(`SELECT * FROM academy_acesso WHERE aluno_id=? AND alvo_tipo='curso' AND alvo_id=? ORDER BY validade DESC`).get(alunoId, cursoId) as any;
+    if (!a) return '';
+    const t = _acTempoAcesso(a);
+    if (t.vitalicio) return ' · <span style="color:#7ddc8f">acesso vitalício</span>';
+    if (t.expirado) return ' · <span style="color:#e06b6b">acesso expirado</span>';
+    return ' · <span style="color:#e7c86a">' + t.restante_dias + ' dias de acesso restantes</span>';
+  } catch { return ''; }
+};
+
+// Importação de ALUNOS v2 — aceita acessos por curso com INÍCIO + VALIDADE (data) individuais por curso.
+// body: { linhas: [ { nome, email, tags, acessos:[ {curso_id, inicio:'YYYY-MM-DD', validade:'YYYY-MM-DD'|'vitalicio'} ] } ] }
+app.post('/academy/importar/alunos2', (req: any, res: any) => {
+  try {
+    const linhas: any[] = Array.isArray((req.body || {}).linhas) ? (req.body as any).linhas : [];
+    let novos = 0, atualizados = 0, acessos = 0, tags = 0;
+    const tx = db.transaction((rows: any[]) => {
+      for (const r of rows) {
+        const email = String(r.email || '').trim().toLowerCase(); if (!email) continue;
+        let al = db.prepare(`SELECT * FROM academy_matriculas WHERE lower(email)=?`).get(email) as any;
+        let id = al && al.id;
+        if (!al) { id = randomUUID(); const tok = _acToken(); db.prepare(`INSERT INTO academy_matriculas (id,nome,email,token_login,ativo,criado_em) VALUES (?,?,?,?,1,?)`).run(id, String(r.nome || ''), email, tok, agora()); novos++; }
+        else { if (r.nome && !al.nome) db.prepare(`UPDATE academy_matriculas SET nome=? WHERE id=?`).run(String(r.nome), id); atualizados++; }
+        for (const tg of String(r.tags || '').split(/[;,]/).map((x: string) => x.trim()).filter(Boolean)) {
+          let tag = db.prepare(`SELECT id FROM academy_tags WHERE lower(nome)=?`).get(tg.toLowerCase()) as any;
+          if (!tag) { const tid = randomUUID(); db.prepare(`INSERT INTO academy_tags (id,nome,cor) VALUES (?,?,'')`).run(tid, tg); tag = { id: tid }; }
+          db.prepare(`INSERT OR IGNORE INTO academy_aluno_tags (aluno_id,tag_id) VALUES (?,?)`).run(id, tag.id); tags++;
+        }
+        for (const ac of (Array.isArray(r.acessos) ? r.acessos : [])) {
+          const cid = String((ac && ac.curso_id) || ''); if (!cid) continue;
+          const val = String((ac && ac.validade) || 'vitalicio');
+          const ini = String((ac && ac.inicio) || '');
+          const ex = db.prepare(`SELECT id FROM academy_acesso WHERE aluno_id=? AND alvo_tipo='curso' AND alvo_id=?`).get(id, cid) as any;
+          if (ex) db.prepare(`UPDATE academy_acesso SET validade=?, inicio=? WHERE id=?`).run(val, ini, ex.id);
+          else db.prepare(`INSERT INTO academy_acesso (id,aluno_id,alvo_tipo,alvo_id,validade,inicio,criado_em) VALUES (?,?,?,?,?,?,?)`).run(randomUUID(), id, 'curso', cid, val, ini, agora());
+          acessos++;
+        }
+      }
+    });
+    tx(linhas);
+    _ndOk(res, { novos, atualizados, acessos, tags, total: linhas.length });
+  } catch (e) { _ndErr(res, e); }
+});
+
+// Admin: acessos de um aluno COM tempo restante calculado (entrada + total + restante).
+app.get('/academy/aluno/:id/acessos', (req: any, res: any) => {
+  try {
+    const al = db.prepare(`SELECT * FROM academy_matriculas WHERE id=?`).get(String(req.params.id)) as any;
+    if (!al) return _ndErr(res, 'aluno nao encontrado');
+    const accs = db.prepare(`SELECT a.*, c.nome curso_nome FROM academy_acesso a LEFT JOIN academy_cursos c ON c.id=a.alvo_id WHERE a.aluno_id=? AND a.alvo_tipo='curso'`).all(al.id) as any[];
+    const out = accs.map((a) => ({ curso_id: a.alvo_id, curso_nome: a.curso_nome || a.alvo_id, inicio: a.inicio || null, validade: a.validade, tempo: _acTempoAcesso(a) }));
+    _ndOk(res, { aluno: { id: al.id, nome: al.nome, email: al.email }, acessos: out });
+  } catch (e) { _ndErr(res, e); }
+});
 
 app.listen(PORT, () => console.log(`[engine] ouvindo na porta ${PORT} — base ${PUBLIC_BASE_URL}`));
