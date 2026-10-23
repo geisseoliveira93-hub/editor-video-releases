@@ -295,8 +295,11 @@ type Config = {
   // [num-escolha] Número PADRÃO de envio por projeto (nome da instância). Usado por numeroConectado
   // como preferência; se vazio/desconectado, cai no 1º conectado. Evita mandar do número errado (ex.: pessoal).
   numeroPadrao?: Partial<Record<Projeto, string>>;
+  // [+presenca] mostrar "digitando…" (texto) e "gravando áudio…" (áudio) antes de enviar no 1-a-1. Default: ligado.
+  presencaSimulada?: boolean;
 };
 const CONFIG_DEFAULT: Config = {
+  presencaSimulada: true,
   produtoProjeto: {},
   palavraChaveProjeto: [
     { contem: 'baixo', projeto: 'baixo' },
@@ -723,11 +726,31 @@ function numeroConectado(projeto: Projeto): any {
   ).get(projeto);
 }
 
+// [+presenca] "digitando…" (texto) e "gravando áudio…" (áudio) antes de enviar — ritmo humano.
+// Global, LIGADO por padrão (CONFIG.presencaSimulada). SÓ no 1-a-1 (nunca em grupo) e SÓ nos envios
+// enviarTexto/enviarMidia (agentes, entrega, recuperação, lembretes) — NÃO no disparo em massa.
+function _presencaLigada(): boolean { const v = (CONFIG as any).presencaSimulada; return v === undefined ? true : !!v; }
+function _presencaMs(ref: string, modo: 'composing' | 'recording'): number {
+  if (modo === 'recording') return 2800;
+  const n = String(ref || '').length;
+  return Math.min(6000, Math.max(1400, Math.round((n / 22) * 1000))); // ~22 caracteres/seg
+}
+async function _simularPresenca(inst: string, para: string, modo: 'composing' | 'recording', ref: string): Promise<void> {
+  try {
+    if (!_presencaLigada()) return;
+    if (!inst || !para || String(para).includes('@g.us')) return; // nunca em grupo
+    const ms = _presencaMs(ref, modo);
+    try { await evo(`/chat/sendPresence/${encodeURIComponent(inst)}`, 'POST', { number: para, delay: ms, presence: modo }); } catch { /* best-effort */ }
+    await new Promise((r) => setTimeout(r, ms));
+  } catch { /* nunca quebra o envio */ }
+}
+
 /** Envia texto por um número do projeto (pega o 1º conectado como padrão). */
 async function enviarTexto(projeto: Projeto, para: string, texto: string, instancia?: string) {
   // [num-escolha] instancia opcional: manda por um número específico. Sem ela, usa o padrão do projeto.
   const inst = instancia || numeroConectado(projeto)?.instancia;
   if (!inst) throw new Error(`Nenhum número conectado no projeto ${projeto}`);
+  await _simularPresenca(inst, para, 'composing', texto); // [+presenca] "digitando…"
   return evo(`/message/sendText/${inst}`, 'POST', {
     number: para, text: texto,
   });
@@ -739,6 +762,7 @@ async function enviarMidia(projeto: Projeto, para: string, tipo: string, url: st
   const inst = instancia || numeroConectado(projeto)?.instancia;
   if (!inst) throw new Error(`Nenhum número conectado no projeto ${projeto}`);
   if (!url) throw new Error('midia_sem_url');
+  await _simularPresenca(inst, para, tipo === 'audio' ? 'recording' : 'composing', legenda || ''); // [+presenca] "gravando áudio…"/"digitando…"
   if (tipo === 'audio') {
     return evo(`/message/sendWhatsAppAudio/${inst}`, 'POST', { number: para, audio: url });
   }
@@ -1591,6 +1615,7 @@ app.get('/flows/motor', (_req, res) => {
       entregaProjeto: (CONFIG.entregaFluxo || {}),
       recuperacaoProjeto: (CONFIG.recuperacaoFluxo || {}),
       fixos: [fixoDed],
+      presencaSimulada: _presencaLigada(),
     });
   } catch (e: any) { res.json({ ok: false, erro: String(e?.message || e) }); }
 });
@@ -2200,6 +2225,10 @@ app.post('/pagina', (req, res) => {
 });
 app.post('/pagina/remover', (req, res) => { db.prepare(`DELETE FROM paginas WHERE id=?`).run(String((req.body || {}).id || '')); res.json({ ok: true }); });
 app.get('/config/base', (_req, res) => { res.json({ ok: true, base: PUBLIC_BASE_URL || '' }); });
+
+// [+presenca] ligar/desligar o "digitando…/gravando áudio…" antes de enviar (1-a-1). Default: ligado.
+app.get('/config/presenca', (_req, res) => { res.json({ ok: true, ligado: _presencaLigada() }); });
+app.post('/config/presenca', (req, res) => { const b = req.body || {}; (CONFIG as any).presencaSimulada = (b.ligado !== false); salvarConfig(); res.json({ ok: true, ligado: _presencaLigada() }); });
 // [pagina-ia] Edita o HTML da página por instrução em português (usa o provedor de IA do motor).
 // Recebe { html, instrucao } e devolve { ok, html } com o HTML completo já alterado.
 app.post('/pagina/ia', async (req, res) => {
@@ -4548,6 +4577,7 @@ app.post('/wa/mcp/enviar', async (req: any, res: any) => {
     if (_waEnviadosHoje() >= teto) return res.json({ ok: false, erro: `teto diário de ${teto} mensagens atingido para o MCP (ajuste em Config)` });
     const id = randomUUID();
     try {
+      await _simularPresenca(inst, tel, 'composing', texto); // [+presenca] "digitando…" (MCP 1-a-1)
       const r: any = await evo(`/message/sendText/${inst}`, 'POST', { number: tel, text: texto });
       const msgId = String(r?.key?.id || r?.id || '');
       db.prepare(`INSERT INTO wa_mcp_log(id,criado_em,instancia,telefone,texto,status,erro,msg_id) VALUES(?,?,?,?,?,?,?,?)`).run(id, agora(), inst, tel, texto, 'enviado', '', msgId);
@@ -6368,10 +6398,12 @@ function _odBaixarPub(rel: string): string {
 }
 // envia por uma INSTÂNCIA específica (não pelo projeto). Reusa evo().
 async function enviarTextoVia(instancia: string, para: string, texto: string) {
+  await _simularPresenca(instancia, para, 'composing', texto); // [+presenca] "digitando…" (pula grupo)
   return evo(`/message/sendText/${encodeURIComponent(instancia)}`, 'POST', { number: para, text: texto });
 }
 async function enviarMidiaVia(instancia: string, para: string, tipo: string, url: string, legenda?: string) {
   if (!url) throw new Error('midia_sem_url');
+  await _simularPresenca(instancia, para, tipo === 'audio' ? 'recording' : 'composing', legenda || ''); // [+presenca]
   if (tipo === 'audio') return evo(`/message/sendWhatsAppAudio/${encodeURIComponent(instancia)}`, 'POST', { number: para, audio: url });
   const mediatype = tipo === 'video' ? 'video' : (tipo === 'documento' || tipo === 'document') ? 'document' : 'image';
   const body: any = { number: para, mediatype, media: url };
