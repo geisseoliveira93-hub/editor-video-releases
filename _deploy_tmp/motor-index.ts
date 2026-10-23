@@ -508,6 +508,65 @@ function seedFluxoDedilhados(): void {
 }
 seedFluxoDedilhados();
 
+// ===================== [+recup-dedilhados] Fluxo de recuperação "Dedilhados – Botão WhatsApp" =====================
+// Quem toca no botão de WhatsApp da página de Dedilhados chega no 8151 com a FRASE-GATILHO. O motor, sozinho:
+// detecta a frase -> aplica tag -> dispara 3 mensagens (texto+vídeo+texto / imagem+texto / texto) -> e PARA na hora
+// se a pessoa RESPONDER (cancela pendentes + handoff pro agente de venda) ou COMPRAR (cancela pendentes).
+// PERMANENTE por natureza: o fluxo é FIXO no código (sobrevive a deploy, não depende de config.json).
+// SEPARADO do CONFIG.recuperacaoFluxo genérico (carrinho abandonado de todos os produtos de teclado).
+const _RECUP_DED_CHAVE = 'recuperacao-dedilhados-botao';
+const _RECUP_DED_TAG = 'lead-dedilhados-botao';
+const _RECUP_DED_FRASE = 'pagina do metodo de dedilhados'; // comparado sem acento e em minúsculo
+const _RECUP_DED_INST = 'Teclado-mr3-novo'; // número 8151
+const _RECUP_DED_AGENTE = 'Vendas Low Dedilhados';
+const _RECUP_DED_CKT = 'https://lastlink.com/p/CD0AA67DB/checkout-payment';
+const _RECUP_DED_FLUXO: FluxoPasso[] = [
+  { tipo: 'texto', delaySegundos: 0, texto: 'Oi! Que bom que você veio pela página dos dedilhados 😊\nFiz esse vídeo rapidinho pra te mostrar por dentro como são as aulas e o que você recebe.\nDá uma olhada com calma 👇' },
+  { tipo: 'video', delaySegundos: 3, url: 'https://motor.melodiaseriffs.com.br/media/e09ef5bf2fc9c2b3.mp4', legenda: '' },
+  { tipo: 'texto', delaySegundos: 3, texto: 'Resumindo o que você leva 👇\n\n🎹 20 dedilhados em vídeo, passo a passo (tecla por tecla)\n📄 PDF com todos organizados pra consultar na hora\n⏱️ Exercícios pra soltar os dedos e ganhar velocidade\n🎁 4 bônus: rotina de 15 min/dia, acordes + baixos, exercícios de fluidez e o mapa visual dos dedilhados\n\nTudo com acesso vitalício — é seu pra sempre, estuda no seu tempo 🙏🏼\n\nE tá rolando a promoção de Black antecipada: de R$97 por R$37 à vista.\n\n👉 Pra garantir o seu acesso: ' + _RECUP_DED_CKT + '\n\nQualquer dúvida é só me chamar aqui 😊' },
+  { tipo: 'imagem', delaySegundos: 10800, url: 'https://motor.melodiaseriffs.com.br/media/a26d4d04182a3159.png', legenda: '' }, // msg 2 = 3h depois da msg 1
+  { tipo: 'texto', delaySegundos: 3, texto: '{nome}, deixa eu tirar as dúvidas mais comuns antes de você decidir 😊\n\n❓ "Sou iniciante, será que consigo?" — Consegue sim, é feito pra quem tá começando, bem devagar, tecla por tecla.\n❓ "Não tenho muito tempo" — Tem um bônus só sobre praticar em 15 minutinhos por dia.\n❓ "Já tenho uma idade" — Tem gente de 60+ tocando em dedilhado hoje. Não é dom, é método 🙏🏼\n\nE você ainda tem 7 dias de garantia: se não curtir, devolvo todo o valor, sem complicação.\n\n👉 ' + _RECUP_DED_CKT },
+  { tipo: 'texto', delaySegundos: 86400, janela: { de: '08:00', ate: '22:00' }, texto: 'Oi {nome}! Passando só pra lembrar que a promoção da Black antecipada (de R$97 por R$37) ainda tá de pé por aqui 🎹\n\nSe tá querendo tocar os louvores com mais firmeza e emoção, esse é o empurrãozinho pra começar hoje mesmo 😊\n\n⚠️ Só que esse valor é por tempo limitado — quando a Black antecipada encerrar, volta pro preço normal. Não deixa pra depois e acabar perdendo 🙏🏼\n\n👉 Garante agora o seu acesso: ' + _RECUP_DED_CKT }, // msg 3 = 1 dia depois da msg 2, só 08-22h
+];
+function _normFrase(s: any): string {
+  try { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); } catch { return String(s || '').toLowerCase(); }
+}
+function _contatoTemTagNome(projeto: string, contatoId: string, tagNome: string): boolean {
+  try {
+    const t = db.prepare(`SELECT id FROM tags WHERE projeto=? AND nome=?`).get(projeto, tagNome) as any;
+    if (!t) return false;
+    return !!(db.prepare(`SELECT 1 FROM contato_tags WHERE contato_id=? AND tag_id=? LIMIT 1`).get(contatoId, t.id) as any);
+  } catch { return false; }
+}
+function _recupDedPendentes(telefone: string): number {
+  try { return Number((db.prepare(`SELECT COUNT(*) n FROM fila_envio WHERE para=? AND fluxo_chave=? AND status='pendente'`).get(String(telefone), _RECUP_DED_CHAVE) as any)?.n || 0); } catch { return 0; }
+}
+function _recupDedCancelarPendentes(telefone: string): number {
+  try { return Number((db.prepare(`UPDATE fila_envio SET status='cancelado' WHERE para=? AND fluxo_chave=? AND status='pendente'`).run(String(telefone), _RECUP_DED_CHAVE) as any)?.changes || 0); } catch { return 0; }
+}
+function _iniciarRecupDedilhados(projeto: string, contatoId: string, telefone: string, nomeBruto?: string): boolean {
+  try {
+    // DEDUP "passa 1 vez": já tem a tag OU já existe qualquer mensagem desse fluxo p/ esse número
+    if (_contatoTemTagNome(projeto, contatoId, _RECUP_DED_TAG)) return false;
+    try { if (db.prepare(`SELECT 1 FROM fila_envio WHERE para=? AND fluxo_chave=? LIMIT 1`).get(String(telefone), _RECUP_DED_CHAVE) as any) return false; } catch { /* */ }
+    aplicarTag(projeto, contatoId, _RECUP_DED_TAG);
+    try { rodarAutomacoes(projeto, 'tag_adicionada', { contatoId, telefone, tag: _RECUP_DED_TAG }).catch(() => { /* */ }); } catch { /* */ }
+    enfileirarFluxo(projeto as Projeto, String(telefone), _RECUP_DED_FLUXO, _primeiroNomeBonito(nomeBruto), { chamarPeloNome: true, nomeFallback: '' }, _RECUP_DED_INST, _RECUP_DED_CHAVE);
+    return true;
+  } catch { return false; }
+}
+function _handoffRecupDedilhados(projeto: string, contatoId: string, telefone: string, ultimaMsg: string, instancia?: string): void {
+  try {
+    const a = (db.prepare(`SELECT id,projeto,nome FROM agentes_ia WHERE projeto=? AND lower(nome)=lower(?) LIMIT 1`).get(projeto, _RECUP_DED_AGENTE) as any)
+      || (db.prepare(`SELECT id,projeto,nome FROM agentes_ia WHERE lower(nome)=lower(?) LIMIT 1`).get(_RECUP_DED_AGENTE) as any);
+    if (!a) return; // agente ainda não criado -> não faz handoff (não quebra nada)
+    try { db.prepare(`INSERT INTO contato_agente(contato_id,agente_id,origem,atualizado_em) VALUES(?,?,?,?) ON CONFLICT(contato_id) DO UPDATE SET agente_id=excluded.agente_id, origem=excluded.origem, atualizado_em=excluded.atualizado_em`).run(contatoId, a.id, 'handoff-recup-dedilhados', agora()); } catch { /* */ }
+    try { const ac = db.prepare(`SELECT id FROM agente_conversas WHERE contato_id=? ORDER BY atualizado_em DESC LIMIT 1`).get(contatoId) as any; if (ac) db.prepare(`UPDATE agente_conversas SET status='ativo', atualizado_em=? WHERE id=?`).run(agora(), ac.id); } catch { /* */ }
+    const _ct = db.prepare(`SELECT nome FROM contatos WHERE id=?`).get(contatoId) as any;
+    processarMensagemAgente(projeto, String(telefone), String(ultimaMsg || ''), (_ct && _ct.nome) || undefined, contatoId, { instancia: instancia || undefined, ativacaoManual: true }).catch(() => { /* */ });
+  } catch { /* best-effort: handoff nunca quebra o webhook */ }
+}
+
 
 /** Descobre o projeto de um pagamento pelo produto (id, nome).
  * Ordem (do mais confiável pro mais genérico):
@@ -733,6 +792,8 @@ function produtoFluxoMatch(produtoId?: string, produtoNome?: string): FluxoProdu
 
 /** Dispara a ENTREGA: usa o fluxo do produto/projeto se houver; senão a mensagem simples. */
 async function dispararEntrega(projeto: Projeto, telefone: string, nome?: string, produtoId?: string, produtoNome?: string): Promise<'fluxo' | 'mensagem'> {
+  // [+recup-dedilhados] se a compra é do dedilhados, cancela o fluxo de recuperação pendente (não cobrar quem já comprou)
+  try { if (/dedilhado/i.test(`${produtoId || ''} ${produtoNome || ''}`)) _recupDedCancelarPendentes(String(telefone || '')); } catch { /* best-effort */ }
   // Fluxo do PRODUTO (traz junto as opções de "chamar pelo nome"); senão fluxo por projeto.
   const fpProduto = produtoFluxoMatch(produtoId, produtoNome);
   // [campanhas-ativas] fluxo PAUSADO: novo comprador NÃO entra (não dispara nada deste produto).
@@ -2727,6 +2788,13 @@ app.post('/webhook/evolution', (req, res) => {
         // Automacoes: gatilho "mensagem_recebida" (palavra-chave opcional na condicao).
         if (!ehGrupo) rodarAutomacoes(projeto, 'mensagem_recebida', { contatoId: cid, telefone, nome: data.pushName, texto }).catch(() => {});
         try { if (!ehGrupo && ((CONFIG as any).agentesHabilitados || {})[projeto] && (_agenteDevResponder(projeto, cid) || _temAgenteAtribuido(cid)) && !_contatoEhAluno(projeto, cid) && !_ehNumeroNosso(telefone)) processarMensagemAgente(projeto, telefone, texto, data.pushName, cid, { instancia: String(ev.instance || '') }).catch(() => {}); } catch { /* agente IA best-effort, etapa14 — e etapa19c: nunca em grupo — [motor2] + gate por tag (8151): sem tag-gatilho fica na fila (ou agente atribuído manual/handoff); [#2-guard] nunca atende aluno nem número nosso; responde pela MESMA instância que recebeu */ }
+        // [+recup-dedilhados] gatilho por FRASE do botão WhatsApp + PARADA automática (só teclado, 1-a-1, nunca grupo)
+        if (!ehGrupo && projeto === 'teclado') {
+          try {
+            if (_normFrase(texto).includes(_RECUP_DED_FRASE)) { _iniciarRecupDedilhados(projeto, cid, telefone, data.pushName); } // a FRASE inicia o fluxo (dedup 1x)
+            else if (_recupDedPendentes(telefone) > 0) { _recupDedCancelarPendentes(telefone); _handoffRecupDedilhados(projeto, cid, telefone, texto, String(ev.instance || '')); } // RESPONDEU -> cancela msg 2/3 + passa pro agente
+          } catch { /* best-effort: nunca quebra o webhook */ }
+        }
       }
     }
     if (ev?.event === 'connection.update' && data?.state) {
