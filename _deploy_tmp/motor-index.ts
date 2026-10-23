@@ -11135,9 +11135,23 @@ app.get(['/area', '/area/vitrine/home'], (req: any, res: any) => {
     const novos = cursos.filter((c) => c.criado_em && c.criado_em >= new Date(Date.now() - 30 * 864e5).toISOString());
     if (novos.length) shelves += `<div class="shelf"><h2>✨ Novidades</h2><div class="rail">${novos.map(cardHtml).join('')}</div></div>`;
     const _catMeta = _acCatMeta();
-    if (cats.length) shelves += `<div class="shelf"><h2>Categorias</h2><div class="rail">` + cats.map((ct) => _acCatTile(ct, _catMeta)).join('') + `</div></div>`;
-    for (const v of vitrines) {
-      if (cats.length && String(v.categoria || '').trim()) continue; // categorizadas vão pra página da categoria
+    // [layout 23/10 Ezequias] faixa "Categorias" (tiles) REMOVIDA da home — fica igual à Cademí: prateleiras por instrumento DIRETO.
+    //   Código antigo preservado (não apagar):
+    //   if (cats.length) shelves += `<div class="shelf"><h2>Categorias</h2><div class="rail">` + cats.map((ct) => _acCatTile(ct, _catMeta)).join('') + `</div></div>`;
+    //   for (const v of vitrines) {
+    //     if (cats.length && String(v.categoria || '').trim()) continue; // categorizadas iam pra /area/categoria
+    //     const doV = cursos.filter((c) => c.vitrine_id === v.id);
+    //     if (!doV.length) continue;
+    //     shelves += `<div class="shelf"><h2>${esc(v.nome || '')}</h2><div class="rail">${doV.map(cardHtml).join('')}</div></div>`;
+    //   }
+    // AGORA: TODAS as vitrines viram prateleira na home; "E-books e Cifras" vai no TOPO (depois de Novidades).
+    const _ordVit = vitrines.slice().sort((a: any, b: any) => {
+      const ea = /e-?books?/i.test(String(a.nome || '') + ' ' + String(a.categoria || '')) ? 0 : 1;
+      const eb = /e-?books?/i.test(String(b.nome || '') + ' ' + String(b.categoria || '')) ? 0 : 1;
+      if (ea !== eb) return ea - eb;
+      return (Number(a.ordem || 0) - Number(b.ordem || 0)) || String(a.nome || '').localeCompare(String(b.nome || ''));
+    });
+    for (const v of _ordVit) {
       const doV = cursos.filter((c) => c.vitrine_id === v.id);
       if (!doV.length) continue;
       shelves += `<div class="shelf"><h2>${esc(v.nome || '')}</h2><div class="rail">${doV.map(cardHtml).join('')}</div></div>`;
@@ -11145,7 +11159,9 @@ app.get(['/area', '/area/vitrine/home'], (req: any, res: any) => {
     const semVit = cursos.filter((c) => !c.vitrine_id);
     if (semVit.length) shelves += `<div class="shelf"><h2>Cursos</h2><div class="rail">${semVit.map(cardHtml).join('')}</div></div>`;
     if (!shelves) shelves = `<div class="card2" style="margin-top:24px;text-align:center;color:#8a8a96">Seus cursos aparecerão aqui.</div>`;
-    const corpo = hero + `<div class="wrap">` + shelves + `</div>` + _acPopupHtml(al);
+    // [layout 23/10] sonzinho curto ao passar o mouse no card (Web Audio; o navegador libera o som após o 1º clique). O zoom no hover já está no CSS (.card:hover .pz).
+    const _somHover = `<script>(function(){var ac=null,last=0;function arm(){if(ac)return;try{var AC=window.AudioContext||window.webkitAudioContext;ac=new AC();}catch(e){}}window.addEventListener('pointerdown',arm);function tick(){if(!ac)return;var now=Date.now();if(now-last<60)return;last=now;try{var o=ac.createOscillator(),g=ac.createGain();o.type='sine';o.frequency.setValueAtTime(1150,ac.currentTime);o.connect(g);g.connect(ac.destination);var t=ac.currentTime;g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(0.05,t+0.008);g.gain.exponentialRampToValueAtTime(0.0001,t+0.1);o.start(t);o.stop(t+0.11);}catch(e){}}document.querySelectorAll('.card').forEach(function(c){c.addEventListener('mouseenter',tick);});})();</script>`;
+    const corpo = hero + `<div class="wrap">` + shelves + `</div>` + _acPopupHtml(al) + _somHover;
     res.type('html').send(_acPage(al, 'Início', corpo, 'home'));
   } catch (e: any) { res.status(500).type('html').send('<pre>' + esc(String(e && e.message || e)) + '</pre>'); }
 });
