@@ -993,6 +993,7 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/capi/webhook/')) return next(); // etapa29: webhook público de venda (Hotmart/Kiwify/Guru chamam sem x-api-key)
   if (req.path === '/track/snippet.js') return next(); // [#5 rastreio] snippet do navegador (sem x-api-key)
   if (req.path === '/track/evento') return next();     // [#5 rastreio] evento do navegador (sem x-api-key)
+  if (req.path.startsWith('/obs/on_publish')) return next(); // [+obs] webhooks do nginx-rtmp (valida por token na query)
   if (req.path.startsWith('/media/')) return next(); // etapa21: mídia baixada do OneDrive, servida pra Evolution buscar (URL interna da rede docker)
   if (req.path.startsWith('/w/')) return next();      // [webinario] sala pública do webinário (espectadores)
   if (req.path.startsWith('/w-api/')) return next();  // [webinario] APIs públicas da sala (chat/contador/vendas)
@@ -13001,6 +13002,91 @@ app.get('/saude/producao', (_req, res) => { res.json({ ok: true, saude: _saudePr
 app.get('/saude/vigia-log', (req, res) => { try { const n = Math.min(200, Number(req.query.limite || 50)); res.json({ ok: true, itens: db.prepare(`SELECT * FROM log_vigia ORDER BY criado_em DESC LIMIT ?`).all(n) }); } catch (e: any) { res.json({ ok: false, erro: String(e?.message || e) }); } });
 setInterval(() => { vigiaProducao().catch(() => { /* */ }); }, 5 * 60 * 1000);
 setTimeout(() => { vigiaProducao().catch(() => { /* */ }); }, 20000); // 1º check ~20s após o boot
+
+// ===================== [+obs] AO VIVO PELO OBS — ingest RTMP (nginx-rtmp) -> multistream (stream copy) =====================
+// O OBS do Ezequias empurra 2 sinais (h/v) pro nginx-rtmp (serviço novo no docker-compose). Quando um sinal
+// começa a publicar, o nginx-rtmp chama /obs/on_publish; o motor sobe 1 ffmpeg COPY por destino marcado, do
+// ingest local pras redes (leve, tempo real). Reconecta sozinho. Prévia = HLS do nginx-rtmp. Tudo add-only.
+const OBS_PUBLIC_RTMP = process.env.OBS_PUBLIC_RTMP || 'rtmp://live.melodiaseriffs.com.br/live';
+const OBS_INGEST_BASE = process.env.OBS_INGEST_BASE || 'rtmp://rtmp:1935/live'; // nome do serviço nginx-rtmp na rede docker
+const OBS_HLS_BASE = process.env.OBS_HLS_BASE || 'https://live.melodiaseriffs.com.br/hls';
+const OBS_HOOK_TOKEN = process.env.OBS_HOOK_TOKEN || ENGINE_API_KEY || 'obs-hook';
+try { db.exec(`CREATE TABLE IF NOT EXISTS obs_sinal ( id TEXT PRIMARY KEY, stream_key TEXT, label TEXT, atualizado_em TEXT )`); } catch { /* ja existe */ }
+try { db.exec(`CREATE TABLE IF NOT EXISTS obs_rota ( id TEXT PRIMARY KEY, sinal TEXT, plataforma TEXT, instrumento TEXT, nome TEXT, rtmp_base TEXT, stream_key TEXT, ativo INTEGER DEFAULT 1, criado_em TEXT, atualizado_em TEXT )`); } catch { /* ja existe */ }
+function _obsChaveNova(p: string): string { return 'mr-' + p + '-' + randomUUID().replace(/-/g, '').slice(0, 10); }
+function _obsSeed(): void {
+  for (const par of [['h', 'HORIZONTAL (16:9)'], ['v', 'VERTICAL (9:16)']] as [string, string][]) {
+    const ex = db.prepare(`SELECT id FROM obs_sinal WHERE id=?`).get(par[0]) as any;
+    if (!ex) db.prepare(`INSERT INTO obs_sinal(id,stream_key,label,atualizado_em) VALUES(?,?,?,?)`).run(par[0], _obsChaveNova(par[0]), par[1], agora());
+  }
+}
+_obsSeed();
+function _obsSinais(): any[] { return db.prepare(`SELECT * FROM obs_sinal ORDER BY id`).all() as any[]; }
+function _obsSinalPorKey(key: string): string | null { const r = db.prepare(`SELECT id FROM obs_sinal WHERE stream_key=?`).get(String(key)) as any; return r ? r.id : null; }
+function _obsRotas(sinal?: string): any[] { return sinal ? (db.prepare(`SELECT * FROM obs_rota WHERE sinal=? ORDER BY plataforma`).all(sinal) as any[]) : (db.prepare(`SELECT * FROM obs_rota ORDER BY sinal, plataforma`).all() as any[]); }
+function _obsDestFull(r: any): string { const base = String(r.rtmp_base || '').replace(/\/+$/, ''); const key = String(r.stream_key || ''); return base ? (base + '/' + key) : ''; }
+const _obsRelays: Map<string, Array<{ id: string; child: any; tentativas: number; vivo: boolean; dest: string }>> = new Map();
+const _obsPublicando: Record<string, { desde: string }> = {};
+function _obsFfmpegCopy(input: string, outFull: string): any {
+  // relay de um sinal JÁ codificado pelo OBS: só COPIA (sem recodificar) -> leve, tempo real.
+  const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'warning', '-i', input, '-c', 'copy', '-f', 'flv', outFull], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let tail = ''; try { child.stderr.on('data', (d: any) => { tail = (tail + String(d)).slice(-800); }); } catch { /* */ }
+  (child as any)._tail = () => tail;
+  return child;
+}
+function _obsPararRelay(sinal: string): void {
+  const arr = _obsRelays.get(sinal) || [];
+  for (const r of arr) { r.vivo = false; try { r.child.kill('SIGKILL'); } catch { /* */ } }
+  _obsRelays.set(sinal, []);
+  delete _obsPublicando[sinal];
+}
+function _obsIniciarRelay(sinal: string): void {
+  _obsPararRelay(sinal);
+  _obsPublicando[sinal] = { desde: agora() };
+  const sk = (db.prepare(`SELECT stream_key FROM obs_sinal WHERE id=?`).get(sinal) as any)?.stream_key;
+  if (!sk) return;
+  const input = OBS_INGEST_BASE + '/' + sk;
+  const rotas = _obsRotas(sinal).filter((r: any) => Number(r.ativo) === 1 && _obsDestFull(r));
+  const arr: Array<{ id: string; child: any; tentativas: number; vivo: boolean; dest: string }> = [];
+  for (const r of rotas) {
+    const dest = _obsDestFull(r);
+    const spawnRelay = (tent: number) => {
+      const child = _obsFfmpegCopy(input, dest);
+      const item = { id: r.id, child, tentativas: tent, vivo: true, dest };
+      child.on('exit', () => {
+        if (!item.vivo || !_obsPublicando[sinal]) return; // parada intencional
+        if (tent >= 20) { _vigiaAlerta('obs-relay-' + r.id, 'o repasse do sinal ' + sinal + ' pra ' + (r.nome || r.plataforma) + ' caiu e parou de reconectar.').catch(() => { /* */ }); return; }
+        setTimeout(() => { if (_obsPublicando[sinal]) { const novo = spawnRelay(tent + 1); const idx = arr.findIndex((x) => x.id === r.id); if (idx >= 0) arr[idx] = novo; } }, 3000);
+      });
+      return item;
+    };
+    arr.push(spawnRelay(0));
+  }
+  _obsRelays.set(sinal, arr);
+}
+app.get('/obs/config', (_req, res) => {
+  const sinais = _obsSinais().map((s: any) => ({ id: s.id, label: s.label, streamKey: s.stream_key, rtmpUrl: OBS_PUBLIC_RTMP, hls: OBS_HLS_BASE + '/' + s.stream_key + '.m3u8', publicando: !!_obsPublicando[s.id] }));
+  res.json({ ok: true, ingestUrl: OBS_PUBLIC_RTMP, hlsBase: OBS_HLS_BASE, sinais, rotas: _obsRotas(), plataformas: ['youtube', 'facebook', 'instagram', 'tiktok', 'custom'], instrumentos: PROJETOS });
+});
+app.post('/obs/rota', (req, res) => {
+  try {
+    const b = req.body || {}; const sinal = String(b.sinal || ''); if (sinal !== 'h' && sinal !== 'v') return res.json({ ok: false, erro: 'sinal_invalido' });
+    const id = String(b.id || '') || randomUUID();
+    const ex = db.prepare(`SELECT id FROM obs_rota WHERE id=?`).get(id) as any;
+    if (ex) db.prepare(`UPDATE obs_rota SET sinal=?,plataforma=?,instrumento=?,nome=?,rtmp_base=?,stream_key=?,ativo=?,atualizado_em=? WHERE id=?`).run(sinal, String(b.plataforma || 'custom'), String(b.instrumento || ''), String(b.nome || ''), String(b.rtmp_base || ''), String(b.stream_key || ''), b.ativo === false ? 0 : 1, agora(), id);
+    else db.prepare(`INSERT INTO obs_rota(id,sinal,plataforma,instrumento,nome,rtmp_base,stream_key,ativo,criado_em,atualizado_em) VALUES(?,?,?,?,?,?,?,?,?,?)`).run(id, sinal, String(b.plataforma || 'custom'), String(b.instrumento || ''), String(b.nome || ''), String(b.rtmp_base || ''), String(b.stream_key || ''), b.ativo === false ? 0 : 1, agora(), agora());
+    if (_obsPublicando[sinal]) _obsIniciarRelay(sinal); // aplica na hora se estiver no ar
+    res.json({ ok: true, id });
+  } catch (e: any) { res.json({ ok: false, erro: String(e?.message || e) }); }
+});
+app.post('/obs/rota/remover', (req, res) => { try { const id = String((req.body || {}).id || ''); const r = db.prepare(`SELECT sinal FROM obs_rota WHERE id=?`).get(id) as any; db.prepare(`DELETE FROM obs_rota WHERE id=?`).run(id); if (r && _obsPublicando[r.sinal]) _obsIniciarRelay(r.sinal); res.json({ ok: true }); } catch (e: any) { res.json({ ok: false, erro: String(e?.message || e) }); } });
+app.post('/obs/sinal/regenerar', (req, res) => { try { const sinal = String((req.body || {}).sinal || ''); if (sinal !== 'h' && sinal !== 'v') return res.json({ ok: false, erro: 'sinal_invalido' }); const nk = _obsChaveNova(sinal); db.prepare(`UPDATE obs_sinal SET stream_key=?,atualizado_em=? WHERE id=?`).run(nk, agora(), sinal); res.json({ ok: true, streamKey: nk }); } catch (e: any) { res.json({ ok: false, erro: String(e?.message || e) }); } });
+app.get('/obs/status', (_req, res) => { const out: any = { ok: true, sinais: {} }; for (const s of _obsSinais()) { const arr = _obsRelays.get(s.id) || []; out.sinais[s.id] = { publicando: !!_obsPublicando[s.id], desde: _obsPublicando[s.id]?.desde || null, relays: arr.map((r: any) => ({ id: r.id, vivo: r.vivo, tentativas: r.tentativas })) }; } res.json(out); });
+app.post('/obs/parar', (req, res) => { const sinal = String((req.body || {}).sinal || ''); if (sinal) { _obsPararRelay(sinal); } else { _obsPararRelay('h'); _obsPararRelay('v'); } res.json({ ok: true }); });
+// webhooks do nginx-rtmp (sem x-api-key; valida token na query). nginx manda 'name'=chave no corpo (form).
+app.post('/obs/on_publish', (req, res) => { try { if (String(req.query.token || '') !== OBS_HOOK_TOKEN) return res.status(403).send('no'); const key = String((req.body && req.body.name) || req.query.name || ''); const sinal = _obsSinalPorKey(key); if (!sinal) return res.status(404).send('chave desconhecida'); _obsIniciarRelay(sinal); console.log('[obs] on_publish sinal', sinal); return res.status(200).send('ok'); } catch { return res.status(200).send('ok'); } });
+app.post('/obs/on_publish_done', (req, res) => { try { if (String(req.query.token || '') !== OBS_HOOK_TOKEN) return res.status(403).send('no'); const key = String((req.body && req.body.name) || req.query.name || ''); const sinal = _obsSinalPorKey(key); if (sinal) { _obsPararRelay(sinal); console.log('[obs] on_publish_done sinal', sinal); } return res.status(200).send('ok'); } catch { return res.status(200).send('ok'); } });
+console.log('[+obs] rotas /obs/* carregadas (ao vivo pelo OBS).');
 
 app.listen(PORT, () => console.log(`[engine] ouvindo na porta ${PORT} — base ${PUBLIC_BASE_URL}`));
 
