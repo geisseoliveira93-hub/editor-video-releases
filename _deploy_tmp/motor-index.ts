@@ -341,12 +341,35 @@ function carregarConfig(): Config {
 }
 let CONFIG = carregarConfig();
 
+// ===================== [+seguranca-camada1] CONFIG também no BANCO (sobrevive a deploy) =====================
+// Problema histórico: o deploy copiava engine/config.json POR CIMA de /data/config.json e apagava os
+// configs de produção (agentesHabilitados, agenteModoWa, canalIg, numeroPadrao, presencaSimulada...).
+// Solução definitiva: espelhar TODO o CONFIG numa tabela do /data/engine.db (que o deploy NÃO toca).
+// No boot o BANCO MANDA: mescla o snapshot do banco POR CIMA do config.json. Como todos os setters já
+// chamam salvarConfig(), basta salvarConfig() gravar também no banco — cobre tudo de uma vez. Add-only.
+try { db.exec(`CREATE TABLE IF NOT EXISTS config_runtime ( chave TEXT PRIMARY KEY, valor TEXT NOT NULL, atualizado_em TEXT NOT NULL DEFAULT (datetime('now')) )`); } catch { /* ja existe */ }
+function _configRuntimeSalvar(): void {
+  try { db.prepare(`INSERT INTO config_runtime(chave,valor,atualizado_em) VALUES('CONFIG',?,datetime('now')) ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor, atualizado_em=excluded.atualizado_em`).run(JSON.stringify(CONFIG)); } catch { /* best-effort */ }
+}
+function _configRuntimeCarregar(): void {
+  try {
+    const r = db.prepare(`SELECT valor FROM config_runtime WHERE chave='CONFIG'`).get() as any;
+    if (r && r.valor) { const snap = JSON.parse(r.valor); CONFIG = { ...CONFIG, ...snap }; console.log('[seguranca] CONFIG mesclado do banco (sobrevive a deploy).'); }
+    else { _configRuntimeSalvar(); console.log('[seguranca] config_runtime semeado do config.json (1a vez).'); }
+  } catch (e: any) { console.log('[seguranca] erro ao carregar config_runtime (seguindo):', e?.message || e); }
+}
+_configRuntimeCarregar();
+// Convenience p/ código novo: muda UMA chave de topo do CONFIG e já persiste nos 2 lugares.
+function salvarConfigPermanente(chave: string, valor: any): void { (CONFIG as any)[chave] = valor; salvarConfig(); }
+void salvarConfigPermanente; // reservado p/ uso futuro (evita "não usado")
+
 // ----------------------- Salvar config (construtor de fluxos do app) -----------------------
 // Grava o CONFIG atual em /data/config.json (volume do engine). Usado pelos endpoints /flows
 // pro app publicar os fluxos de entrega/recuperacao sem editar o arquivo na mao.
 function salvarConfig(): void {
   fs.mkdirSync('/data', { recursive: true });
   fs.writeFileSync('/data/config.json', JSON.stringify(CONFIG, null, 2), 'utf8');
+  try { _configRuntimeSalvar(); } catch { /* best-effort */ } // [+seguranca-camada1] espelha no banco (sobrevive a deploy)
 }
 
 // ----------------------- [entrega-perm] Fluxos de entrega PERMANENTES -----------------------
@@ -12918,6 +12941,66 @@ app.get('/academy/audio-push/lista', (req: any, res: any) => {
     res.type('text/plain').send(rows.map((r) => r.id + ',' + r.video_ref).join('\n'));
   } catch (e: any) { res.status(500).type('text/plain').send(String((e && e.message) || e)); }
 });
+
+// ===================== [+seguranca-camada3] VIGIA DE PRODUÇÃO (monitor + auto-cura segura + alerta) =====================
+// Com a CAMADA 1 o CONFIG já sobrevive a deploy. A vigia é a rede 24/7: no boot e a cada 5min confere os
+// sinais vitais, AUTO-CURA o que é seguro (re-semeia o fluxo "dedilhados" se sumir) e AVISA no WhatsApp
+// quando algo está vermelho (número padrão offline, fila travada, fluxo sumiu). NÃO liga/desliga agente
+// sozinho (pra não brigar com mudança intencional sua). Tudo best-effort — nunca quebra o motor.
+try { db.exec(`CREATE TABLE IF NOT EXISTS log_vigia ( id TEXT PRIMARY KEY, criado_em TEXT, item TEXT, status TEXT, detalhe TEXT )`); } catch { /* ja existe */ }
+const _vigiaUltimoAlerta: Record<string, number> = {};
+function _vigiaPodeAlertar(item: string): boolean {
+  const ag = Date.now(); const ult = _vigiaUltimoAlerta[item] || 0;
+  if (ag - ult < 60 * 60 * 1000) return false; // máx 1 alerta por item por hora
+  _vigiaUltimoAlerta[item] = ag; return true;
+}
+async function _vigiaAlerta(item: string, msg: string): Promise<void> {
+  try {
+    try { db.prepare(`INSERT INTO log_vigia(id,criado_em,item,status,detalhe) VALUES(?,?,?,?,?)`).run(randomUUID(), agora(), item, 'alerta', msg); } catch { /* */ }
+    if (!_vigiaPodeAlertar(item)) return;
+    const instTeclado = ((CONFIG as any).numeroPadrao || {}).teclado || _RECUP_DED_INST;
+    await enviarTexto('teclado' as Projeto, '5516981518794', '⚠️ Motor: ' + msg, instTeclado).catch(() => { /* */ });
+  } catch { /* nunca quebra */ }
+}
+function _saudeProducao(): any {
+  const r: any = { ok: true, itens: {} };
+  try {
+    const temDed = (CONFIG.entregaFluxoProduto || []).some((f) => String(f.chave || '').toLowerCase() === 'dedilhados');
+    r.itens.entregaDedilhados = temDed ? 'ok' : 'vermelho';
+    r.itens.agentesHabilitados = (CONFIG as any).agentesHabilitados || {};
+    r.itens.canalIg = (CONFIG as any).canalIg || {};
+    const instT = ((CONFIG as any).numeroPadrao || {}).teclado || '';
+    const nT = instT ? (db.prepare(`SELECT status FROM numeros WHERE instancia=?`).get(instT) as any) : null;
+    r.itens.numeroPadraoTeclado = { instancia: instT, status: nT ? nT.status : 'nao_cadastrado' };
+    const atrasados = (db.prepare(`SELECT COUNT(*) n FROM fila_envio WHERE status IN ('pendente','camp_pend','cmp_multi','cmp_mmk') AND agendado_para < ?`).get(new Date(Date.now() - 10 * 60000).toISOString()) as any)?.n || 0;
+    r.itens.filaAtrasada = Number(atrasados);
+    r.itens.presencaSimulada = _presencaLigada();
+    r.ok = temDed && Number(atrasados) < 50;
+  } catch (e: any) { r.ok = false; r.erro = String(e?.message || e); }
+  return r;
+}
+async function vigiaProducao(): Promise<void> {
+  try {
+    const s = _saudeProducao();
+    if (s.itens && s.itens.entregaDedilhados === 'vermelho') {
+      try { seedFluxoDedilhados(); } catch { /* */ }
+      const agoraTem = (CONFIG.entregaFluxoProduto || []).some((f) => String(f.chave || '').toLowerCase() === 'dedilhados');
+      await _vigiaAlerta('entrega-dedilhados', agoraTem ? 'o fluxo de entrega "dedilhados" tinha sumido e foi RESTAURADO automaticamente.' : 'o fluxo "dedilhados" sumiu e NÃO consegui restaurar — confira no app.');
+    }
+    const nT = s.itens && s.itens.numeroPadraoTeclado;
+    if (nT && nT.instancia && nT.status !== 'conectado') {
+      await _vigiaAlerta('numero-teclado-offline', 'o número padrão do Teclado (' + nT.instancia + ') está ' + (nT.status || 'offline') + '. Reconecte pelo QR no app.');
+    }
+    if (s.itens && Number(s.itens.filaAtrasada) >= 50) {
+      await _vigiaAlerta('fila-travada', Number(s.itens.filaAtrasada) + ' mensagens estão atrasadas na fila. Pode ter número desconectado ou worker parado.');
+    }
+    try { db.prepare(`INSERT INTO log_vigia(id,criado_em,item,status,detalhe) VALUES(?,?,?,?,?)`).run(randomUUID(), agora(), 'checkup', s.ok ? 'ok' : 'atencao', JSON.stringify(s.itens || {})); } catch { /* */ }
+  } catch { /* nunca quebra */ }
+}
+app.get('/saude/producao', (_req, res) => { res.json({ ok: true, saude: _saudeProducao() }); });
+app.get('/saude/vigia-log', (req, res) => { try { const n = Math.min(200, Number(req.query.limite || 50)); res.json({ ok: true, itens: db.prepare(`SELECT * FROM log_vigia ORDER BY criado_em DESC LIMIT ?`).all(n) }); } catch (e: any) { res.json({ ok: false, erro: String(e?.message || e) }); } });
+setInterval(() => { vigiaProducao().catch(() => { /* */ }); }, 5 * 60 * 1000);
+setTimeout(() => { vigiaProducao().catch(() => { /* */ }); }, 20000); // 1º check ~20s após o boot
 
 app.listen(PORT, () => console.log(`[engine] ouvindo na porta ${PORT} — base ${PUBLIC_BASE_URL}`));
 
