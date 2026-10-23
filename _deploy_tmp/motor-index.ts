@@ -2592,8 +2592,19 @@ function _contatoTemTagGatilho(projeto: string, contatoId: string): boolean {
   } catch { /* best-effort */ }
   return false;
 }
+// [modo-wa 22/10] Lê o modo do agente no WhatsApp por projeto. Sem config => 'tags' (igual antes).
+function _agenteModoWa(projeto: string): 'manual' | 'tags' | 'todos' {
+  const m = String((((CONFIG as any).agenteModoWa) || {})[projeto] || 'tags');
+  return (m === 'manual' || m === 'todos') ? m : 'tags';
+}
 /** [motor2] O agente PODE responder a esse contato? Gate LIGADO (padrão) exige tag-gatilho. */
 function _agenteDevResponder(projeto: string, contatoId: string): boolean {
+  // [modo-wa 22/10] Modo de entrada do agente no WhatsApp, POR PROJETO (CONFIG.agenteModoWa[projeto]):
+  //   'manual' = só quem você atribuir manualmente em Atendimentos (tag NÃO ativa ninguém)
+  //   'tags'   = padrão (comportamento atual): tag-gatilho OU atribuição manual
+  //   'todos'  = qualquer contato do número (continua bloqueando aluno, número nosso e grupo)
+  // A atribuição manual (_temAgenteAtribuido) é checada à parte no gancho, então vale nos 3 modos.
+  { const _modo = _agenteModoWa(projeto); if (_modo === 'manual') return false; if (_modo === 'todos') return true; }
   if (pubFlag('agente_tag_gate', '1') !== '1') return true; // gate desligado => comportamento antigo (responde a todos)
   return _contatoTemTagGatilho(projeto, contatoId);
 }
@@ -3451,6 +3462,18 @@ app.post('/agente', (req, res) => {
   db.prepare(`INSERT INTO agentes_ia(id,projeto,nome,prompt,modelo,temperatura,ativo,tools_on,config,criado_em,atualizado_em) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
     .run(novo, String(b.projeto || ''), String(b.nome || ''), String(b.prompt || ''), String(b.modelo || 'gpt-4o-mini'), Number(b.temperatura == null ? 0.7 : b.temperatura), b.ativo ? 1 : 0, b.toolsOn === false ? 0 : 1, JSON.stringify(b.config || {}), agora(), agora());
   res.json({ ok: true, id: novo });
+});
+// [agente-config 22/10] Atualiza SÓ campos do config do agente (merge), sem precisar reenviar o prompt inteiro.
+// POST /agente/config {id, config:{sala?, grupo?, ...}}
+app.post('/agente/config', (req, res) => {
+  const b = req.body || {};
+  const id = String(b.id || '');
+  const ex = db.prepare(`SELECT config FROM agentes_ia WHERE id=?`).get(id) as any;
+  if (!ex) return res.status(404).json({ ok: false, erro: 'agente_inexistente' });
+  let c: any = {}; try { c = JSON.parse(ex.config || '{}'); } catch { c = {}; }
+  const novo = { ...c, ...((b.config && typeof b.config === 'object') ? b.config : {}) };
+  db.prepare(`UPDATE agentes_ia SET config=?, atualizado_em=? WHERE id=?`).run(JSON.stringify(novo), agora(), id);
+  res.json({ ok: true, id, config: novo });
 });
 app.post('/agente/remover', (req, res) => { db.prepare(`DELETE FROM agentes_ia WHERE id=?`).run(String((req.body || {}).id || '')); res.json({ ok: true }); });
 app.get('/agente/conversas', (req, res) => {
@@ -4661,6 +4684,25 @@ app.post('/config/numero-padrao', (req, res) => {
 
 // ======================= [motor2] Endpoints de gestão (trilha/tags/flags) =======================
 // Deixam o app ligar/desligar e editar as tags por produto SEM redeploy. Exigem x-api-key (middleware global).
+// [modo-wa 22/10] Ver/trocar o modo de entrada do agente no WhatsApp por projeto.
+// GET  /motor2/agente-modo            -> { modos:{projeto:modo}, habilitados }
+// POST /motor2/agente-modo {projeto, modo:'manual'|'tags'|'todos'}
+app.get('/motor2/agente-modo', (_req, res) => {
+  const modos: any = {};
+  for (const p of PROJETOS as any) modos[p] = _agenteModoWa(String(p));
+  res.json({ ok: true, modos, habilitados: (CONFIG as any).agentesHabilitados || {} });
+});
+app.post('/motor2/agente-modo', (req, res) => {
+  const b = req.body || {};
+  const projeto = String(b.projeto || '');
+  const modo = String(b.modo || '');
+  if (!(PROJETOS as any).includes(projeto)) return res.status(400).json({ ok: false, erro: 'projeto_invalido' });
+  if (!['manual', 'tags', 'todos'].includes(modo)) return res.status(400).json({ ok: false, erro: 'modo_invalido (manual|tags|todos)' });
+  if (!(CONFIG as any).agenteModoWa) (CONFIG as any).agenteModoWa = {};
+  (CONFIG as any).agenteModoWa[projeto] = modo;
+  try { salvarConfig(); } catch { /* best-effort */ }
+  res.json({ ok: true, projeto, modo });
+});
 app.get('/motor2/config', (_req, res) => {
   res.json({
     ok: true,
@@ -4669,6 +4711,7 @@ app.get('/motor2/config', (_req, res) => {
     produtoTags: (CONFIG as any).produtoTags || [],
     agenteTagsGatilho: (CONFIG as any).agenteTagsGatilho || [],
     agenteTagsGatilhoEfetivo: _agenteTagsGatilho(),
+    agenteModoWa: (CONFIG as any).agenteModoWa || {},
   });
 });
 // Substitui a lista de tags por produto (array completo). Grava no config.json.
