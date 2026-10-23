@@ -528,6 +528,29 @@ const _RECUP_DED_FLUXO: FluxoPasso[] = [
   { tipo: 'texto', delaySegundos: 3, texto: '{nome}, deixa eu tirar as dúvidas mais comuns antes de você decidir 😊\n\n❓ "Sou iniciante, será que consigo?" — Consegue sim, é feito pra quem tá começando, bem devagar, tecla por tecla.\n❓ "Não tenho muito tempo" — Tem um bônus só sobre praticar em 15 minutinhos por dia.\n❓ "Já tenho uma idade" — Tem gente de 60+ tocando em dedilhado hoje. Não é dom, é método 🙏🏼\n\nE você ainda tem 7 dias de garantia: se não curtir, devolvo todo o valor, sem complicação.\n\n👉 ' + _RECUP_DED_CKT },
   { tipo: 'texto', delaySegundos: 86400, janela: { de: '08:00', ate: '22:00' }, texto: 'Oi {nome}! Passando só pra lembrar que a promoção da Black antecipada (de R$97 por R$37) ainda tá de pé por aqui 🎹\n\nSe tá querendo tocar os louvores com mais firmeza e emoção, esse é o empurrãozinho pra começar hoje mesmo 😊\n\n⚠️ Só que esse valor é por tempo limitado — quando a Black antecipada encerrar, volta pro preço normal. Não deixa pra depois e acabar perdendo 🙏🏼\n\n👉 Garante agora o seu acesso: ' + _RECUP_DED_CKT }, // msg 3 = 1 dia depois da msg 2, só 08-22h
 ];
+// [+flows-motor] Override EDITÁVEL dos fluxos FIXOS (ex.: recuperação dedilhados).
+// Fica no banco /data/engine.db -> SOBREVIVE A DEPLOY. Sem override, usa o padrão do código.
+// Só ADICIONA: o _RECUP_DED_FLUXO continua intacto como padrão/fallback.
+try { db.exec(`CREATE TABLE IF NOT EXISTS fluxo_fixo_override ( chave TEXT PRIMARY KEY, fluxo_json TEXT, atualizado_em TEXT )`); } catch { /* ja existe */ }
+function _fixoOverrideGet(chave: string): FluxoPasso[] | null {
+  try {
+    const r = db.prepare(`SELECT fluxo_json FROM fluxo_fixo_override WHERE chave=?`).get(String(chave)) as any;
+    if (!r || !r.fluxo_json) return null;
+    const arr = JSON.parse(r.fluxo_json);
+    return (Array.isArray(arr) && arr.length) ? arr as FluxoPasso[] : null;
+  } catch { return null; }
+}
+function _fixoOverrideSave(chave: string, fluxo: FluxoPasso[]): void {
+  db.prepare(`INSERT OR REPLACE INTO fluxo_fixo_override(chave,fluxo_json,atualizado_em) VALUES(?,?,?)`).run(String(chave), JSON.stringify(fluxo || []), agora());
+}
+function _fixoOverrideDel(chave: string): void {
+  try { db.prepare(`DELETE FROM fluxo_fixo_override WHERE chave=?`).run(String(chave)); } catch { /* */ }
+}
+// Fluxo ATUAL da recuperação dedilhados: override salvo (se houver) OU o padrão fixo do código.
+function _recupDedFluxoAtual(): FluxoPasso[] {
+  return _fixoOverrideGet(_RECUP_DED_CHAVE) || _RECUP_DED_FLUXO;
+}
+
 function _normFrase(s: any): string {
   try { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); } catch { return String(s || '').toLowerCase(); }
 }
@@ -551,7 +574,7 @@ function _iniciarRecupDedilhados(projeto: string, contatoId: string, telefone: s
     try { if (db.prepare(`SELECT 1 FROM fila_envio WHERE para=? AND fluxo_chave=? LIMIT 1`).get(String(telefone), _RECUP_DED_CHAVE) as any) return false; } catch { /* */ }
     aplicarTag(projeto, contatoId, _RECUP_DED_TAG);
     try { rodarAutomacoes(projeto, 'tag_adicionada', { contatoId, telefone, tag: _RECUP_DED_TAG }).catch(() => { /* */ }); } catch { /* */ }
-    enfileirarFluxo(projeto as Projeto, String(telefone), _RECUP_DED_FLUXO, _primeiroNomeBonito(nomeBruto), { chamarPeloNome: true, nomeFallback: '' }, _RECUP_DED_INST, _RECUP_DED_CHAVE);
+    enfileirarFluxo(projeto as Projeto, String(telefone), _recupDedFluxoAtual(), _primeiroNomeBonito(nomeBruto), { chamarPeloNome: true, nomeFallback: '' }, _RECUP_DED_INST, _RECUP_DED_CHAVE);
     return true;
   } catch { return false; }
 }
@@ -1544,6 +1567,55 @@ app.post('/flows/projeto', (req, res) => {
   else CONFIG.recuperacaoFluxo = { ...(CONFIG.recuperacaoFluxo || {}), [projeto]: fluxo };
   salvarConfig();
   res.json({ ok: true, projeto, tipo, passos: fluxo.length });
+});
+
+// [+flows-motor] Visão UNIFICADA de TODOS os fluxos do motor (p/ a tela "Fluxos do motor").
+// Junta: entrega por produto, entrega/recuperação por projeto e os fluxos FIXOS (recup dedilhados).
+app.get('/flows/motor', (_req, res) => {
+  try {
+    const fixoDed = {
+      chave: _RECUP_DED_CHAVE, kind: 'fixo',
+      titulo: 'Dedilhados — Botão WhatsApp', projeto: 'teclado',
+      instancia: _RECUP_DED_INST, trigger: _RECUP_DED_FRASE, tag: _RECUP_DED_TAG,
+      agente: _RECUP_DED_AGENTE, checkout: _RECUP_DED_CKT,
+      editado: !!_fixoOverrideGet(_RECUP_DED_CHAVE),
+      stops: [
+        { ic: '✋', t: 'Se a pessoa RESPONDER', d: 'Cancela as mensagens pendentes e passa pro agente "' + _RECUP_DED_AGENTE + '".' },
+        { ic: '🛒', t: 'Se a pessoa COMPRAR', d: 'Cancela as mensagens pendentes na hora.' },
+      ],
+      fluxo: _recupDedFluxoAtual(),
+    };
+    res.json({
+      ok: true,
+      produto: (CONFIG.entregaFluxoProduto || []),
+      entregaProjeto: (CONFIG.entregaFluxo || {}),
+      recuperacaoProjeto: (CONFIG.recuperacaoFluxo || {}),
+      fixos: [fixoDed],
+    });
+  } catch (e: any) { res.json({ ok: false, erro: String(e?.message || e) }); }
+});
+
+// [+flows-motor] Salva o override de um fluxo FIXO (sobrevive a deploy). body: { chave, fluxo:[] }
+app.post('/flows/fixo/salvar', (req, res) => {
+  try {
+    const b = req.body || {};
+    const chave = String(b.chave || '').trim();
+    if (chave !== _RECUP_DED_CHAVE) return res.status(400).json({ ok: false, erro: 'chave_nao_permitida' });
+    const fluxo = normalizaFluxo(b.fluxo);
+    if (!fluxo.length) return res.status(400).json({ ok: false, erro: 'fluxo_vazio' });
+    _fixoOverrideSave(chave, fluxo);
+    res.json({ ok: true, chave, passos: fluxo.length });
+  } catch (e: any) { res.json({ ok: false, erro: String(e?.message || e) }); }
+});
+
+// [+flows-motor] Volta o fluxo FIXO pro padrão do código (remove o override). body: { chave }
+app.post('/flows/fixo/reset', (req, res) => {
+  try {
+    const chave = String((req.body || {}).chave || '').trim();
+    if (chave !== _RECUP_DED_CHAVE) return res.status(400).json({ ok: false, erro: 'chave_nao_permitida' });
+    _fixoOverrideDel(chave);
+    res.json({ ok: true, chave, restaurado: true });
+  } catch (e: any) { res.json({ ok: false, erro: String(e?.message || e) }); }
 });
 
 
