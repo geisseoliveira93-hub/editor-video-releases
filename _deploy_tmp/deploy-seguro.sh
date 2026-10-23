@@ -38,8 +38,20 @@ if [ -n "$FALTA" ]; then
 fi
 echo "   ok — todos os marcadores de proteção presentes."
 
-echo "==> [3/3] Rodando o deploy normal (deploy-motor-v2.sh) ..."
+echo "==> [3/4] Rodando o deploy normal (deploy-motor-v2.sh) ..."
 bash deploy-motor-v2.sh
+
+echo "==> [4/4] [camada4] Agendando backup OFF-SITE diario (OneDrive) se ainda nao houver ..."
+if [ -f /opt/motor/backup-offsite.sh ]; then
+  if crontab -l 2>/dev/null | grep -q "backup-offsite.sh"; then
+    echo "   backup off-site ja estava agendado."
+  else
+    ( crontab -l 2>/dev/null; echo "30 3 * * * cd /opt/motor && bash backup-offsite.sh >> /opt/motor/data-backups/offsite.log 2>&1" ) | crontab -
+    echo "   backup off-site agendado (03:30 todo dia)."
+  fi
+else
+  echo "   (backup-offsite.sh nao esta em /opt/motor ainda — baixe-o junto no comando de deploy; vou pular por ora.)"
+fi
 
 echo
 echo "==================== DEPLOY SEGURO CONCLUÍDO ===================="
