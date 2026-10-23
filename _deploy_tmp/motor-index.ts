@@ -1224,7 +1224,85 @@ app.post('/agenda/evento', (req, res) => {
   else db.prepare(`INSERT INTO eventos(id,projeto,titulo,inicio,fim,contato_id,obs,criado_em) VALUES(?,?,?,?,?,?,?,?)`).run(id, String(b.projeto || ''), String(b.titulo || ''), String(b.inicio || ''), String(b.fim || ''), b.contatoId || null, String(b.obs || ''), agora());
   res.json({ ok: true, id });
 });
-app.post('/agenda/evento/remover', (req, res) => { db.prepare(`DELETE FROM eventos WHERE id=?`).run(String((req.body || {}).id || '')); res.json({ ok: true }); });
+app.post('/agenda/evento/remover', (req, res) => {
+  const _evid = String((req.body || {}).id || '');
+  // [lembretes-sessao] cancela os lembretes pendentes desse evento antes de apagar
+  try { db.prepare(`UPDATE agenda_lembretes SET status='cancelado' WHERE evento_id=? AND status IN ('pendente','pulado')`).run(_evid); } catch { /* best-effort */ }
+  db.prepare(`DELETE FROM eventos WHERE id=?`).run(_evid);
+  res.json({ ok: true });
+});
+// ===================== [lembretes-sessao] endpoints =====================
+// Config da lista de lembretes por instrumento (GET/POST) + listagem/cancelamento/regeração/retroativo.
+app.get('/agenda/lembretes/config', (req, res) => {
+  const projeto = String(req.query.projeto || '');
+  if (!PROJETOS.includes(projeto as any)) return res.status(400).json({ ok: false, erro: 'projeto_invalido' });
+  res.json({ ok: true, projeto, lembretes: _lembretesSessaoLista(projeto) });
+});
+app.post('/agenda/lembretes/config', (req, res) => {
+  const b = req.body || {};
+  const projeto = String(b.projeto || '');
+  if (!PROJETOS.includes(projeto as any)) return res.status(400).json({ ok: false, erro: 'projeto_invalido' });
+  if (!Array.isArray(b.lembretes)) return res.status(400).json({ ok: false, erro: 'lembretes_deve_ser_array' });
+  if (b.lembretes.length > 20) return res.status(400).json({ ok: false, erro: 'maximo_20_por_instrumento' });
+  const lista: any[] = [];
+  for (const lb of b.lembretes) {
+    const texto = String((lb && lb.texto) || '').trim();
+    if (!texto) return res.status(400).json({ ok: false, erro: 'texto_vazio' });
+    const q = (lb && lb.quando) || {};
+    const tipo = String(q.tipo || '');
+    if (!['antes', 'depois', 'horario_fixo'].includes(tipo)) return res.status(400).json({ ok: false, erro: 'quando_tipo_invalido' });
+    if ((tipo === 'antes' || tipo === 'depois') && !(Number(q.valor) > 0)) return res.status(400).json({ ok: false, erro: 'tempo_invalido' });
+    lista.push({
+      id: String(lb.id || randomUUID()).slice(0, 40),
+      nome: String(lb.nome || '').slice(0, 60),
+      ativo: lb.ativo !== false,
+      quando: tipo === 'horario_fixo'
+        ? { tipo, diasAntes: Math.max(0, Number(q.diasAntes || 0)), hora: String(q.hora || '09:00').slice(0, 5) }
+        : { tipo, valor: Number(q.valor), unidade: ['min', 'h', 'dias'].includes(String(q.unidade)) ? String(q.unidade) : 'min' },
+      texto,
+      incluir_link_sala: !!lb.incluir_link_sala,
+    });
+  }
+  if (!(CONFIG as any).lembretesSessao) (CONFIG as any).lembretesSessao = {};
+  (CONFIG as any).lembretesSessao[projeto] = lista;
+  try { salvarConfig(); } catch (e: any) { return res.status(500).json({ ok: false, erro: String(e && e.message || e) }); }
+  res.json({ ok: true, projeto, lembretes: lista });
+});
+app.get('/agenda/lembretes', (req, res) => {
+  const projeto = String(req.query.projeto || '');
+  const eventoId = String(req.query.evento_id || '');
+  const cond: string[] = []; const argq: any[] = [];
+  if (projeto) { cond.push('projeto=?'); argq.push(projeto); }
+  if (eventoId) { cond.push('evento_id=?'); argq.push(eventoId); }
+  const where = cond.length ? ('WHERE ' + cond.join(' AND ')) : '';
+  const rows = db.prepare(`SELECT * FROM agenda_lembretes ${where} ORDER BY enviar_em LIMIT 500`).all(...argq);
+  res.json({ ok: true, lembretes: rows });
+});
+app.post('/agenda/lembretes/cancelar', (req, res) => {
+  const eventoId = String((req.body || {}).evento_id || '');
+  if (!eventoId) return res.status(400).json({ ok: false, erro: 'evento_obrigatorio' });
+  const r = db.prepare(`UPDATE agenda_lembretes SET status='cancelado' WHERE evento_id=? AND status IN ('pendente','pulado')`).run(eventoId);
+  res.json({ ok: true, cancelados: r.changes });
+});
+app.post('/agenda/lembretes/regerar', (req, res) => {
+  const eventoId = String((req.body || {}).evento_id || '');
+  if (!eventoId) return res.status(400).json({ ok: false, erro: 'evento_obrigatorio' });
+  const n = _gerarLembretesParaEvento(eventoId, true);
+  res.json({ ok: true, criados: n });
+});
+app.post('/agenda/lembretes/gerar-retroativo', (_req, res) => {
+  const nowISO = agora();
+  const evs = db.prepare(`SELECT id FROM eventos WHERE inicio > ?`).all(nowISO) as any[];
+  let criados = 0; let eventos = 0;
+  for (const ev of evs) {
+    const ja = db.prepare(`SELECT COUNT(*) n FROM agenda_lembretes WHERE evento_id=?`).get(ev.id) as any;
+    if (ja && ja.n > 0) continue;
+    criados += _gerarLembretesParaEvento(ev.id, false);
+    eventos++;
+  }
+  res.json({ ok: true, eventos, criados });
+});
+// ===================== fim [lembretes-sessao] endpoints =====================
 // ---- Mensagens rapidas ----
 app.get('/crm/respostas', (req, res) => {
   const projeto = String(req.query.projeto || '');
@@ -3084,24 +3162,170 @@ CREATE TABLE IF NOT EXISTS contato_agente (
 // Metadados por instrumento (grade real, link do grupo gratis, sala, corte de idade).
 // dia da semana: 0=Dom 1=Seg 2=Ter 3=Qua 4=Qui 5=Sex 6=Sab.
 // Baixo Qua/Sex; Teclado Seg/Qui; Violao Seg/Qui. (fonte: calibracao dos agentes)
+// ============================ [lembretes-sessao 23/10] ============================
+// Lembretes automáticos e PERSONALIZÁVEIS da sessão ao vivo, POR INSTRUMENTO (lista livre, sem limite fixo).
+// CONFIG.lembretesSessao[projeto] = [ {id,nome,ativo,quando:{tipo:'antes'|'depois'|'horario_fixo',valor,unidade,diasAntes,hora}, texto, incluir_link_sala} ].
+// Ao marcar_agendamento, cria 1 linha em agenda_lembretes por lembrete ATIVO (pulando os que já teriam passado).
+// Ticker de 60s envia os pendentes vencidos pela MESMA instância que atendeu o lead. TUDO ADITIVO.
+db.exec(`CREATE TABLE IF NOT EXISTS agenda_lembretes (
+  id TEXT PRIMARY KEY,
+  evento_id TEXT,
+  projeto TEXT,
+  contato_id TEXT,
+  telefone TEXT,
+  instancia TEXT,
+  lembrete_id TEXT,
+  nome TEXT,
+  enviar_em TEXT,
+  texto TEXT,
+  status TEXT DEFAULT 'pendente',
+  erro TEXT,
+  enviado_em TEXT,
+  criado_em TEXT
+)`);
+function _lembretesSessaoDefault(): any[] {
+  return [
+    { id: 'vespera',   nome: 'Véspera 19h',  ativo: true, quando: { tipo: 'horario_fixo', diasAntes: 1, hora: '19:00' }, incluir_link_sala: false, texto: 'Oi {nome}! Passando pra lembrar que amanhã, {dia} às {hora}, é a sua sessão ao vivo com o Professor Ezequias. Confirma pra mim que vai conseguir participar?' },
+    { id: 'dia_manha', nome: 'No dia 9h',    ativo: true, quando: { tipo: 'horario_fixo', diasAntes: 0, hora: '09:00' }, incluir_link_sala: false, texto: 'Bom dia, {nome}! Hoje às {hora} é a nossa sessão ao vivo com o Professor Ezequias. Te espero lá!' },
+    { id: '1h',        nome: '1 hora antes', ativo: true, quando: { tipo: 'antes', valor: 1, unidade: 'h' },             incluir_link_sala: false, texto: '{nome}, daqui a 1 hora começa a sua sessão com o Professor Ezequias ({hora}).' },
+    { id: '10min',     nome: '10 min antes', ativo: true, quando: { tipo: 'antes', valor: 10, unidade: 'min' },          incluir_link_sala: true,  texto: 'Já vai começar! Entra por aqui: {sala}' },
+  ];
+}
+function _lembretesSessaoLista(projeto: string): any[] {
+  const m = (CONFIG as any).lembretesSessao;
+  const l = m && typeof m === 'object' ? m[projeto] : null;
+  return Array.isArray(l) && l.length ? l : _lembretesSessaoDefault();
+}
+function _lembUnidadeMs(unidade: string, valor: any): number {
+  const v = Number(valor) || 0; if (v <= 0) return 0;
+  if (unidade === 'dias' || unidade === 'dia' || unidade === 'd') return v * 86400000;
+  if (unidade === 'h' || unidade === 'hora' || unidade === 'horas') return v * 3600000;
+  return v * 60000; // min (padrão)
+}
+// {y,mo,da} no fuso America/Sao_Paulo
+function _brtYMD(d: Date): { y: number; mo: number; da: number } {
+  try { const s = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d); const [y, mo, da] = s.split('-').map(Number); return { y, mo, da }; }
+  catch { return { y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, da: d.getUTCDate() }; }
+}
+// Hora de parede em SP (BRT = UTC-3; Brasil sem horário de verão desde 2019) -> ISO UTC. Date.UTC normaliza overflow.
+function _spWallToUTCISO(y: number, mo: number, da: number, hh: number, mm: number): string {
+  return new Date(Date.UTC(y, mo - 1, da, hh + 3, mm)).toISOString();
+}
+// N dias antes da DATA (BRT) da sessão, no horário HH:MM (BRT) -> ISO UTC.
+function _spDiasAntesISO(inicioISO: string, N: number, horaHM: string): string {
+  try {
+    const p = _brtYMD(new Date(inicioISO));
+    const t = new Date(Date.UTC(p.y, p.mo - 1, p.da) - Math.max(0, Number(N) || 0) * 86400000);
+    const [hh, mm] = String(horaHM || '09:00').split(':').map(Number);
+    return _spWallToUTCISO(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate(), hh || 0, mm || 0);
+  } catch { return ''; }
+}
+function _lembCalcEnviarEm(lb: any, inicioISO: string, fimISO: string): string {
+  const q = (lb && lb.quando) || {};
+  try {
+    if (q.tipo === 'antes') { const ms = _lembUnidadeMs(q.unidade, q.valor); if (!ms) return ''; return new Date(new Date(inicioISO).getTime() - ms).toISOString(); }
+    if (q.tipo === 'depois') { const ms = _lembUnidadeMs(q.unidade, q.valor); if (!ms) return ''; return new Date(new Date(fimISO || inicioISO).getTime() + ms).toISOString(); }
+    if (q.tipo === 'horario_fixo') { return _spDiasAntesISO(inicioISO, Number(q.diasAntes || 0), String(q.hora || '09:00')); }
+  } catch { /* best-effort */ }
+  return '';
+}
+// Normaliza telefone BR: só dígitos, tira 0 inicial, prefixa 55 se tiver 10/11 dígitos. Lead do Instagram ('ig:...') -> '' (sem WhatsApp).
+function _normalizarTelBR(t: any): string {
+  const raw = String(t || '');
+  if (raw.toLowerCase().startsWith('ig:')) return '';
+  let s = raw.replace(/\D/g, '').replace(/^0+/, '');
+  if (!s) return '';
+  if (s.length === 10 || s.length === 11) s = '55' + s;
+  return s;
+}
+function _fmtDiaBR(iso: string): string {
+  try {
+    const d = new Date(iso);
+    const wd = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'long' }).format(d);
+    const dm = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit' }).format(d);
+    return wd + ' ' + dm;
+  } catch { return ''; }
+}
+// Cria as linhas de lembrete de um evento (pula os que já passaram). Retorna quantos criou.
+function _criarLembretesSessao(projeto: string, eventoId: string, inicioISO: string, fimISO: string, contatoId: string | null, telefoneBruto: any, instancia: string, nomePessoa: string, sala: string): number {
+  const tel = _normalizarTelBR(telefoneBruto);
+  const temWa = !!tel;
+  const lista = _lembretesSessaoLista(projeto);
+  const nowMs = Date.now();
+  const diaBR = _fmtDiaBR(inicioISO);
+  const horaBR = _horaMinSP(new Date(inicioISO));
+  let n = 0;
+  for (const lb of lista) {
+    if (!lb || lb.ativo === false) continue;
+    const enviarISO = _lembCalcEnviarEm(lb, inicioISO, fimISO);
+    if (!enviarISO) continue;
+    if (new Date(enviarISO).getTime() <= nowMs) continue; // já passou -> não cria
+    let txt = String(lb.texto || '');
+    txt = txt.replace(/\{nome\}/g, String(nomePessoa || '')).replace(/\{dia\}/g, diaBR).replace(/\{hora\}/g, horaBR).replace(/\{instrumento\}/g, String(projeto || ''));
+    if (lb.incluir_link_sala && sala && txt.indexOf('{sala}') < 0) txt = txt.replace(/\s+$/, '') + '\n' + sala;
+    txt = txt.replace(/\{sala\}/g, String(sala || ''));
+    const status = temWa ? 'pendente' : 'pulado';
+    const erro = temWa ? '' : 'sem_whatsapp';
+    try {
+      db.prepare(`INSERT INTO agenda_lembretes(id,evento_id,projeto,contato_id,telefone,instancia,lembrete_id,nome,enviar_em,texto,status,erro,enviado_em,criado_em) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(randomUUID(), eventoId, projeto, contatoId || null, tel, instancia || '', String(lb.id || ''), String(lb.nome || ''), enviarISO, txt, status, erro, null, agora());
+      n++;
+    } catch { /* best-effort por linha */ }
+  }
+  return n;
+}
+// (Re)gera os lembretes de um evento existente buscando dados no banco. Usado por regerar/retroativo.
+function _gerarLembretesParaEvento(eventoId: string, apagarAntes: boolean): number {
+  const ev = db.prepare(`SELECT * FROM eventos WHERE id=?`).get(eventoId) as any;
+  if (!ev) return 0;
+  if (apagarAntes) { try { db.prepare(`DELETE FROM agenda_lembretes WHERE evento_id=? AND status IN ('pendente','pulado')`).run(eventoId); } catch { /* best-effort */ } }
+  const ct = ev.contato_id ? (db.prepare(`SELECT telefone, nome FROM contatos WHERE id=?`).get(ev.contato_id) as any) : null;
+  const seedS = (AGENTE_SEED[ev.projeto] && AGENTE_SEED[ev.projeto].sala) || '';
+  const inst = (CONFIG.numeroPadrao && (CONFIG.numeroPadrao as any)[ev.projeto]) || '';
+  return _criarLembretesSessao(String(ev.projeto || ''), eventoId, String(ev.inicio || ''), String(ev.fim || ''), ev.contato_id || null, (ct && ct.telefone) || '', inst, (ct && ct.nome) || '', seedS);
+}
+let _lembTicking = false;
+async function tickLembretesSessao(): Promise<void> {
+  if (_lembTicking) return; _lembTicking = true;
+  try {
+    const nowISO = agora();
+    const rows = db.prepare(`SELECT * FROM agenda_lembretes WHERE status='pendente' AND enviar_em <= ? ORDER BY enviar_em LIMIT 30`).all(nowISO) as any[];
+    for (const r of rows) {
+      try {
+        if (new Date(nowISO).getTime() - new Date(r.enviar_em).getTime() > 2 * 3600000) { db.prepare(`UPDATE agenda_lembretes SET status='pulado', erro='atrasado', enviado_em=? WHERE id=? AND status='pendente'`).run(agora(), r.id); continue; }
+        const ev = db.prepare(`SELECT id FROM eventos WHERE id=?`).get(r.evento_id) as any;
+        if (!ev) { db.prepare(`UPDATE agenda_lembretes SET status='cancelado', erro='evento_removido', enviado_em=? WHERE id=? AND status='pendente'`).run(agora(), r.id); continue; }
+        if (!r.telefone) { db.prepare(`UPDATE agenda_lembretes SET status='pulado', erro='sem_whatsapp', enviado_em=? WHERE id=? AND status='pendente'`).run(agora(), r.id); continue; }
+        // lock anti-duplicado: só prossegue quem conseguir marcar 'enviado' (vale mesmo com ticks sobrepostos)
+        const got = db.prepare(`UPDATE agenda_lembretes SET status='enviado', enviado_em=? WHERE id=? AND status='pendente'`).run(agora(), r.id);
+        if (!got.changes) continue;
+        try { await enviarTexto(r.projeto as any, r.telefone, r.texto, r.instancia ? String(r.instancia) : undefined); }
+        catch (e: any) { db.prepare(`UPDATE agenda_lembretes SET status='erro', erro=? WHERE id=?`).run(String(e && e.message || e), r.id); }
+      } catch { /* best-effort por linha */ }
+    }
+  } catch { /* best-effort */ } finally { _lembTicking = false; }
+}
+setInterval(() => { tickLembretesSessao().catch(() => {}); }, 60000);
+// ======================== fim [lembretes-sessao] ========================
+
 const AGENTE_SEED: any = {
   baixo: {
     nome: 'SDR Baixo',
-    grade: { dias: [3, 5], horas: ['11:00', '15:00', '21:00'], duracaoMin: 60, antecedenciaH: 2 },
+    grade: { dias: [3, 5], horas: ['11:00', '15:00', '21:00'], duracaoMin: 40, antecedenciaH: 2 },
     grupo: 'https://chat.whatsapp.com/FWl2ym2wow0JqVr4u9k3Hm',
     sala: 'https://meet.google.com/rpw-wdwu-cby',
     corteIdade: 24,
   },
   teclado: {
     nome: 'SDR Teclado',
-    grade: { dias: [1, 4], horas: ['11:00', '15:00', '20:00'], duracaoMin: 60, antecedenciaH: 2 },
+    grade: { dias: [1, 4], horas: ['11:00', '15:00', '20:00'], duracaoMin: 40, antecedenciaH: 2 },
     grupo: 'https://chat.whatsapp.com/C1VYxajhCJiCt1EFVuWjmY',
     sala: 'https://meet.google.com/rpw-wdwu-cby',
     corteIdade: 24,
   },
   violao: {
     nome: 'SDR Violao',
-    grade: { dias: [1, 4], horas: ['14:00', '19:00'], duracaoMin: 60, antecedenciaH: 3 },
+    grade: { dias: [1, 4], horas: ['14:00', '19:00'], duracaoMin: 40, antecedenciaH: 3 },
     grupo: '',
     sala: 'https://meet.google.com/rpw-wdwu-cby',
     corteIdade: 24,
@@ -3278,7 +3502,7 @@ function _toolsDef(projeto?: string): any[] {
   const base: any[] = [
     { type: 'function', function: { name: 'listar_horarios_livres', description: 'Lista horarios livres reais da agenda do professor no periodo pedido. Use SEMPRE antes de oferecer horario; nunca invente horario.', parameters: { type: 'object', properties: { periodo: { type: 'string', enum: ['manha', 'tarde', 'noite'] } }, required: ['periodo'] } } },
     { type: 'function', function: { name: 'salvar_whatsapp', description: 'Grava o numero de WhatsApp da pessoa no cadastro (so digitos, comecando com 55 e DDD).', parameters: { type: 'object', properties: { telefone: { type: 'string' } }, required: ['telefone'] } } },
-    { type: 'function', function: { name: 'marcar_agendamento', description: 'Cria o compromisso na agenda. Use o iso exato de um horario que a ferramenta de horarios retornou como livre.', parameters: { type: 'object', properties: { inicio_iso: { type: 'string' }, nome: { type: 'string' }, observacao: { type: 'string' } }, required: ['inicio_iso', 'nome'] } } },
+    { type: 'function', function: { name: 'marcar_agendamento', description: 'Cria o compromisso na agenda. Use o iso exato de um horario que a ferramenta de horarios retornou como livre. O campo "nome" = o NOME DA PESSOA (aluno), nunca o nome da sessao.', parameters: { type: 'object', properties: { inicio_iso: { type: 'string' }, nome: { type: 'string' }, observacao: { type: 'string' } }, required: ['inicio_iso', 'nome'] } } },
     { type: 'function', function: { name: 'registrar_card_crm', description: 'Cria/atualiza o card do lead no CRM com um resumo da qualificacao (horario, instrumento, igreja/gosto, dor, o que perguntou).', parameters: { type: 'object', properties: { resumo: { type: 'string' } }, required: ['resumo'] } } },
     { type: 'function', function: { name: 'adicionar_tag', description: 'Marca o lead com uma tag (ex: sdr-instagram).', parameters: { type: 'object', properties: { tag: { type: 'string' } }, required: ['tag'] } } },
     { type: 'function', function: { name: 'transferir_fila', description: 'Transfere a conversa pra fila humana (o professor assume). O agente para de responder esse lead depois disso.', parameters: { type: 'object', properties: { motivo: { type: 'string' } }, required: ['motivo'] } } },
@@ -3304,17 +3528,25 @@ async function _execTool(projeto: string, conversa: any, nomeFerr: string, args:
     }
     if (nomeFerr === 'marcar_agendamento') {
       const inicio = String(args.inicio_iso || '');
-      const durMin = (seed.grade && seed.grade.duracaoMin) || 60;
+      const durMin = (seed.grade && seed.grade.duracaoMin) || 40;
       const fim = inicio ? new Date(new Date(inicio).getTime() + durMin * 60000).toISOString() : '';
       const id = randomUUID();
+      // [lembretes-sessao] telefone + instância do lead e TÍTULO com o nome da pessoa e o WhatsApp
+      const _ctTel = conversa.contato_id ? (db.prepare(`SELECT telefone FROM contatos WHERE id=?`).get(conversa.contato_id) as any) : null;
+      const _telBruto = (_ctTel && _ctTel.telefone) || conversa.telefone || '';
+      const _wa = _normalizarTelBR(_telBruto);
+      const _inst = ((conversa as any).instancia) || (CONFIG.numeroPadrao && (CONFIG.numeroPadrao as any)[projeto]) || '';
+      const _tituloSessao = 'Sessão ' + projeto + ' - ' + String(args.nome || conversa.telefone) + (_wa ? ' - ' + _wa : '');
       db.prepare(`INSERT INTO eventos(id,projeto,titulo,inicio,fim,contato_id,obs,criado_em) VALUES(?,?,?,?,?,?,?,?)`)
-        .run(id, projeto, 'Sessao ' + projeto + ' - ' + String(args.nome || conversa.telefone), inicio, fim, conversa.contato_id || null, String(args.observacao || ''), agora());
+        .run(id, projeto, _tituloSessao, inicio, fim, conversa.contato_id || null, String(args.observacao || ''), agora());
       // [gcal-ia] se o Google Agenda (nuvem) estiver ligado E a fonte "ia" marcada pelo Ezequias, cria tambem no Google
       let _gcalIaId: string | null = null; let _gcalIaAviso = '';
       if (pubFlag('gcal_ativo') === '1' && _gcalFonteLigada('ia')) {
-        try { _gcalIaId = await _gcalCriarEvento({ tipo: 'ia', refId: id, titulo: 'Sessao ' + projeto + ' - ' + String(args.nome || conversa.telefone), inicio, fim, descricao: String(args.observacao || '') }); }
+        try { _gcalIaId = await _gcalCriarEvento({ tipo: 'ia', refId: id, titulo: _tituloSessao, inicio, fim, descricao: String(args.observacao || '') }); }
         catch (e: any) { _gcalIaAviso = 'google_falhou: ' + String(e && e.message || e); }
       } else if (pubFlag('gcal_ativo') === '1') { _gcalIaAviso = 'fonte_ia_desligada'; }
+      // [lembretes-sessao] cria os lembretes configurados deste evento (best-effort, não quebra a marcação)
+      try { _criarLembretesSessao(projeto, id, inicio, fim, conversa.contato_id || null, _telBruto, _inst, String(args.nome || ''), seed.sala || ''); } catch { /* best-effort */ }
       return { ok: true, id, inicio, fim, sala: seed.sala || '', sala_instrucao: seed.sala ? ('IMPORTANTE: envie este link da sala fixa pro aluno na confirmacao, exatamente assim: ' + seed.sala + ' . Ignore qualquer outro link de meet que apareca.') : '', googleEventId: _gcalIaId, avisoGoogle: _gcalIaAviso };
     }
     if (nomeFerr === 'registrar_card_crm') {
@@ -3388,6 +3620,8 @@ async function processarMensagemAgente(projeto: string, telefone: string, texto:
   let historico: any[] = [];
   try { historico = JSON.parse(conversa.historico || '[]'); } catch { historico = []; }
   historico.push({ role: 'user', content: texto });
+  // [lembretes-sessao] guarda a instância que atendeu o lead p/ os lembretes saírem pelo MESMO número
+  try { if (opts && opts.instancia) (conversa as any).instancia = String(opts.instancia); } catch { /* best-effort */ }
 
   const tools = agente.tools_on ? _toolsDef(projeto) : [];
   const respostasEnviadas: string[] = [];
