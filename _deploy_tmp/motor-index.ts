@@ -865,6 +865,7 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/media/')) return next(); // etapa21: mídia baixada do OneDrive, servida pra Evolution buscar (URL interna da rede docker)
   if (req.path.startsWith('/w/')) return next();      // [webinario] sala pública do webinário (espectadores)
   if (req.path.startsWith('/w-api/')) return next();  // [webinario] APIs públicas da sala (chat/contador/vendas)
+  if (req.path.startsWith('/w-media/')) return next(); // [+webinario-storage] serve o vídeo próprio do webinário (OneDrive) pro player, sem x-api-key
   if (req.path.startsWith('/e/')) return next();      // [evento] pagina publica do evento multi-aula
   if (req.path.startsWith('/e-api/')) return next();  // [evento] API publica do evento (inscricao)
   if (req.path.startsWith('/c/')) return next();      // [#13 convite] pagina publica do convite (o aluno ve e agenda)
@@ -3248,6 +3249,33 @@ function _fmtDiaBR(iso: string): string {
   } catch { return ''; }
 }
 // Cria as linhas de lembrete de um evento (pula os que já passaram). Retorna quantos criou.
+// [+lembretes-nome] Deixa o {nome} bonito a partir do nome cru do perfil do WhatsApp.
+// Remove emoji/símbolos/números/pontuação (mantém letras acentuadas), pega só a 1ª palavra e
+// capitaliza (1ª maiúscula, resto minúsculo). Se sobrar vazio ou parecer número/telefone, devolve ''.
+// Ex.: "aleandro Dias 💈" -> "Aleandro"; "🎹 JOÃO" -> "João"; "MARIA silva" -> "Maria";
+//      "5516999999999" -> ""; "" -> "". Vale pros 4 projetos (usa a mesma função).
+function _primeiroNomeBonito(nome: any): string {
+  try {
+    let s = String(nome == null ? '' : nome).normalize('NFC');
+    s = s.replace(/[^\p{L}\s]/gu, ' ').replace(/\s+/g, ' ').trim(); // só letras (inclui acentos) e espaço
+    if (!s) return '';
+    const prim = s.split(' ')[0] || '';
+    if (!prim || !/\p{L}/u.test(prim)) return '';
+    return prim.charAt(0).toUpperCase() + prim.slice(1).toLowerCase();
+  } catch { return ''; }
+}
+// [+lembretes-nome] Quando NÃO há nome, limpa o texto pra não sobrar "Oi !" nem vírgula solta no começo.
+// Ex.: "Oi !" -> "Oi!"; ", daqui a 1 hora" -> "Daqui a 1 hora".
+function _limpaTextoSemNome(txt: string): string {
+  try {
+    let t = String(txt || '');
+    t = t.replace(/[ \t]+([,!?.;:])/g, '$1');                       // tira espaço antes de pontuação
+    t = t.replace(/[ \t]{2,}/g, ' ');                                // colapsa espaços duplicados
+    t = t.replace(/(^|\n)[ \t]*[,;:!.–—-]+[ \t]*/g, '$1'); // remove pontuação solta no começo da linha
+    t = t.replace(/^(\s*)([\p{L}])/u, (_m, sp, c) => sp + c.toUpperCase()); // capitaliza a 1ª letra do texto
+    return t;
+  } catch { return txt; }
+}
 function _criarLembretesSessao(projeto: string, eventoId: string, inicioISO: string, fimISO: string, contatoId: string | null, telefoneBruto: any, instancia: string, nomePessoa: string, sala: string): number {
   const tel = _normalizarTelBR(telefoneBruto);
   const temWa = !!tel;
@@ -3262,7 +3290,9 @@ function _criarLembretesSessao(projeto: string, eventoId: string, inicioISO: str
     if (!enviarISO) continue;
     if (new Date(enviarISO).getTime() <= nowMs) continue; // já passou -> não cria
     let txt = String(lb.texto || '');
-    txt = txt.replace(/\{nome\}/g, String(nomePessoa || '')).replace(/\{dia\}/g, diaBR).replace(/\{hora\}/g, horaBR).replace(/\{instrumento\}/g, String(projeto || ''));
+    const _nomeB = _primeiroNomeBonito(nomePessoa); // [+lembretes-nome] 1º nome limpo/capitalizado (ou '')
+    txt = txt.replace(/\{nome\}/g, _nomeB).replace(/\{dia\}/g, diaBR).replace(/\{hora\}/g, horaBR).replace(/\{instrumento\}/g, String(projeto || ''));
+    if (!_nomeB) txt = _limpaTextoSemNome(txt); // [+lembretes-nome] sem nome: não deixa "Oi !" nem vírgula solta
     if (lb.incluir_link_sala && sala && txt.indexOf('{sala}') < 0) txt = txt.replace(/\s+$/, '') + '\n' + sala;
     txt = txt.replace(/\{sala\}/g, String(sala || ''));
     const status = temWa ? 'pendente' : 'pulado';
@@ -9171,6 +9201,8 @@ console.log('[webinario] simulacao e mensagens programadas carregadas: /webinari
     let ofertas: any[] = []; try { ofertas = JSON.parse(wb.ofertas_json || '[]'); } catch { ofertas = []; }
     let videoUrl = '';
     if (Number(wb.modo) === 1) videoUrl = String(wb.video_tipo) === 'url' ? String(wb.video_ref || '') : '';
+    // [+webinario-storage] vídeo próprio enviado do PC (fonte 'storage', ref no OneDrive) -> serve pelo /w-media/:slug (Range + cache, igual ao VSL, já comprimido)
+    if (Number(wb.modo) === 1 && String(wb.video_tipo) === 'storage' && String(wb.video_ref || '')) videoUrl = (PUBLIC_BASE_URL || '') + '/w-media/' + wb.slug;
     const s = simGet(wb.slug);
     const sim = s ? {
       vMin: Number(s.cfg.vMin) || 0, vMax: Number(s.cfg.vMax) || 0,
@@ -9195,6 +9227,19 @@ console.log('[webinario] simulacao e mensagens programadas carregadas: /webinari
   app.get('/webinarios/:id', (req: any, res: any) => {
     const wb = wbGet(String(req.params.id)); if (!wb) return res.status(404).json({ ok: false, erro: 'nao_encontrado' });
     res.json({ ok: true, webinario: wb, link: wbBase() + '/w/' + wb.slug });
+  });
+  // [+webinario-storage] serve o vídeo PRÓPRIO do webinário (fonte 'storage', ref no OneDrive): baixa 1x
+  // pro cache /data/media e redireciona pro /media/<hash> (aceita Range/seek, cacheável no CDN). Público.
+  app.get('/w-media/:slug', async (req: any, res: any) => {
+    try {
+      const wb = wbGet(String(req.params.slug)); if (!wb) return res.status(404).send('nao_encontrado');
+      const ref = String(wb.video_ref || ''); if (!ref) return res.status(404).send('sem_video');
+      if (/^https?:\/\//i.test(ref)) return res.redirect(302, ref); // ref já é URL direta
+      const dest = _odDestPath(ref); const nome = dest.split('/').pop();
+      try { if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return res.redirect(302, '/media/' + nome); } catch { /* */ }
+      await _odBaixarGrande(ref); // dedupe + atômico (.part), cacheia em /data/media
+      return res.redirect(302, '/media/' + nome);
+    } catch { res.status(500).send('erro'); }
   });
   app.post('/webinarios', (req: any, res: any) => {
     try {
