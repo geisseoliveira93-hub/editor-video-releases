@@ -3547,6 +3547,18 @@ app.post('/atendimento/atribuir-agente', (req, res) => {
   try { db.prepare(`INSERT INTO contato_agente(contato_id,agente_id,origem,atualizado_em) VALUES(?,?,?,?) ON CONFLICT(contato_id) DO UPDATE SET agente_id=excluded.agente_id, origem=excluded.origem, atualizado_em=excluded.atualizado_em`).run(contatoId, agenteId, 'manual', agora()); } catch (e: any) { return res.status(500).json({ ok: false, erro: String(e && e.message || e) }); }
   // reativa a conversa mais recente desse contato (se estava em humano/encerrada) pro agente assumir
   try { const ac = db.prepare(`SELECT id FROM agente_conversas WHERE contato_id=? ORDER BY atualizado_em DESC LIMIT 1`).get(contatoId) as any; if (ac) db.prepare(`UPDATE agente_conversas SET status='ativo', atualizado_em=? WHERE id=?`).run(agora(), ac.id); } catch { /* best-effort */ }
+  // [ativar-agente-na-hora 23/10] Igual Sellflux: ao ATIVAR/atribuir o agente manualmente, ele JA comeca a atender —
+  // responde a ULTIMA mensagem do contato na hora, sem esperar uma mensagem nova. So dispara se a ultima msg da
+  // conversa for do CONTATO (entrada) e ainda sem resposta. Best-effort/fire-and-forget: nao quebra a atribuicao.
+  try {
+    const _ct = db.prepare(`SELECT telefone, nome, projeto FROM contatos WHERE id=?`).get(contatoId) as any;
+    const _last = db.prepare(`SELECT direcao, texto, instancia FROM mensagens WHERE contato_id=? ORDER BY criado_em DESC LIMIT 1`).get(contatoId) as any;
+    if (_ct && _ct.telefone && _last && _last.direcao === 'entrada' && String(_last.texto || '').trim()) {
+      const _proj = String(_ct.projeto || a.projeto || '');
+      const _inst = String(_last.instancia || '').trim() || undefined;
+      processarMensagemAgente(_proj, String(_ct.telefone), String(_last.texto), _ct.nome || undefined, contatoId, { instancia: _inst, ativacaoManual: true }).catch(() => {});
+    }
+  } catch { /* best-effort: ativacao imediata nao pode quebrar a atribuicao */ }
   res.json({ ok: true, agente: { id: a.id, projeto: a.projeto, nome: a.nome } });
 });
 
