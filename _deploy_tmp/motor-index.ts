@@ -4014,7 +4014,19 @@ app.post('/disparo/fila/editar', (req: any, res: any) => {
     res.json({ ok: alterado > 0, alterado });
   } catch (e: any) { res.json({ ok: false, erro: String(e.message || e) }); }
 });
-console.log('[fila-controle] /disparo/fila-detalhe + /disparo/fila/cancelar|pausar|reenviar|editar');
+// LIMPAR FALHAS (remove da fila os itens que já FALHARAM — só limpa o contador; não reenvia)
+app.post('/disparo/fila/limpar-falhas', (req: any, res: any) => {
+  try {
+    const b = req.body || {};
+    const conds: string[] = ["status='falhou'"]; const args: any[] = [];
+    if (b.instancia) { conds.push('instancia=?'); args.push(String(b.instancia)); }
+    if (b.para) { conds.push('para=?'); args.push(String(b.para)); }
+    if (b.is_grupo != null && String(b.is_grupo) !== '') { conds.push('is_grupo=?'); args.push(Number(b.is_grupo) ? 1 : 0); }
+    const removidos = db.prepare(`DELETE FROM fila_envio WHERE ${conds.join(' AND ')}`).run(...args).changes;
+    res.json({ ok: true, removidos });
+  } catch (e: any) { res.json({ ok: false, erro: String(e.message || e) }); }
+});
+console.log('[fila-controle] /disparo/fila-detalhe + /disparo/fila/cancelar|pausar|reenviar|editar|limpar-falhas');
 
 // ============================================================================
 // [wa-mcp] WhatsApp pro MCP do app: o Claude ler conversas e ENVIAR 1-a-1 pros
@@ -4099,6 +4111,8 @@ app.post('/wa/mcp/enviar', async (req: any, res: any) => {
       const r: any = await evo(`/message/sendText/${inst}`, 'POST', { number: tel, text: texto });
       const msgId = String(r?.key?.id || r?.id || '');
       db.prepare(`INSERT INTO wa_mcp_log(id,criado_em,instancia,telefone,texto,status,erro,msg_id) VALUES(?,?,?,?,?,?,?,?)`).run(id, agora(), inst, tel, texto, 'enviado', '', msgId);
+      // [wa-mcp conversa] grava tambem na thread da conversa (aparece na Central de Atendimento/inbox)
+      try { const _pj = _waProjetoDaInstancia(inst) || 'teclado'; const _cid = upsertContato(_pj, tel, undefined, undefined, 'mcp'); db.prepare(`INSERT INTO mensagens(id,projeto,contato_id,direcao,texto,instancia,criado_em) VALUES(?,?,?,?,?,?,?)`).run(randomUUID(), _pj, _cid, 'saida', texto, inst, agora()); } catch { /* conversa best-effort */ }
       res.json({ ok: true, status: 'enviado', msg_id: msgId, instancia: inst, telefone: tel });
     } catch (e: any) {
       const msg = String(e.message || e);
@@ -4133,6 +4147,7 @@ app.post('/wa/mcp/enviar-arquivo', async (req: any, res: any) => {
       const r: any = await enviarMidia(projeto as any, tel, tipo, url, legenda, inst);
       const msgId = String(r?.key?.id || r?.id || '');
       db.prepare(`INSERT INTO wa_mcp_log(id,criado_em,instancia,telefone,texto,status,erro,msg_id) VALUES(?,?,?,?,?,?,?,?)`).run(id, agora(), inst, tel, `[${tipo}] ${url}${legenda ? ' — ' + legenda : ''}`, 'enviado', '', msgId);
+      try { db.prepare(`INSERT INTO mensagens(id,projeto,contato_id,direcao,texto,instancia,criado_em) VALUES(?,?,?,?,?,?,?)`).run(randomUUID(), projeto, upsertContato(projeto, tel, undefined, undefined, 'mcp'), 'saida', `[${tipo}] ${legenda || url}`, inst, agora()); } catch { /* conversa best-effort */ }
       res.json({ ok: true, status: 'enviado', msg_id: msgId });
     } catch (e: any) {
       const msg = String(e.message || e);
