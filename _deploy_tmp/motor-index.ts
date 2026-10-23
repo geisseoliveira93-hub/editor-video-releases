@@ -13073,8 +13073,8 @@ app.post('/obs/rota', (req, res) => {
     const b = req.body || {}; const sinal = String(b.sinal || ''); if (sinal !== 'h' && sinal !== 'v') return res.json({ ok: false, erro: 'sinal_invalido' });
     const id = String(b.id || '') || randomUUID();
     const ex = db.prepare(`SELECT id FROM obs_rota WHERE id=?`).get(id) as any;
-    if (ex) db.prepare(`UPDATE obs_rota SET sinal=?,plataforma=?,instrumento=?,nome=?,rtmp_base=?,stream_key=?,ativo=?,atualizado_em=? WHERE id=?`).run(sinal, String(b.plataforma || 'custom'), String(b.instrumento || ''), String(b.nome || ''), String(b.rtmp_base || ''), String(b.stream_key || ''), b.ativo === false ? 0 : 1, agora(), id);
-    else db.prepare(`INSERT INTO obs_rota(id,sinal,plataforma,instrumento,nome,rtmp_base,stream_key,ativo,criado_em,atualizado_em) VALUES(?,?,?,?,?,?,?,?,?,?)`).run(id, sinal, String(b.plataforma || 'custom'), String(b.instrumento || ''), String(b.nome || ''), String(b.rtmp_base || ''), String(b.stream_key || ''), b.ativo === false ? 0 : 1, agora(), agora());
+    if (ex) db.prepare(`UPDATE obs_rota SET sinal=?,plataforma=?,instrumento=?,nome=?,rtmp_base=?,stream_key=?,canal_id=?,ativo=?,atualizado_em=? WHERE id=?`).run(sinal, String(b.plataforma || 'custom'), String(b.instrumento || ''), String(b.nome || ''), String(b.rtmp_base || ''), String(b.stream_key || ''), String(b.canal_id || ''), b.ativo === false ? 0 : 1, agora(), id);
+    else db.prepare(`INSERT INTO obs_rota(id,sinal,plataforma,instrumento,nome,rtmp_base,stream_key,canal_id,ativo,criado_em,atualizado_em) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(id, sinal, String(b.plataforma || 'custom'), String(b.instrumento || ''), String(b.nome || ''), String(b.rtmp_base || ''), String(b.stream_key || ''), String(b.canal_id || ''), b.ativo === false ? 0 : 1, agora(), agora());
     if (_obsPublicando[sinal]) _obsIniciarRelay(sinal); // aplica na hora se estiver no ar
     res.json({ ok: true, id });
   } catch (e: any) { res.json({ ok: false, erro: String(e?.message || e) }); }
@@ -13086,6 +13086,75 @@ app.post('/obs/parar', (req, res) => { const sinal = String((req.body || {}).sin
 // webhooks do nginx-rtmp (sem x-api-key; valida token na query). nginx manda 'name'=chave no corpo (form).
 app.post('/obs/on_publish', (req, res) => { try { if (String(req.query.token || '') !== OBS_HOOK_TOKEN) return res.status(403).send('no'); const key = String((req.body && req.body.name) || req.query.name || ''); const sinal = _obsSinalPorKey(key); if (!sinal) return res.status(404).send('chave desconhecida'); _obsIniciarRelay(sinal); console.log('[obs] on_publish sinal', sinal); return res.status(200).send('ok'); } catch { return res.status(200).send('ok'); } });
 app.post('/obs/on_publish_done', (req, res) => { try { if (String(req.query.token || '') !== OBS_HOOK_TOKEN) return res.status(403).send('no'); const key = String((req.body && req.body.name) || req.query.name || ''); const sinal = _obsSinalPorKey(key); if (sinal) { _obsPararRelay(sinal); console.log('[obs] on_publish_done sinal', sinal); } return res.status(200).send('ok'); } catch { return res.status(200).send('ok'); } });
+// [+obs-comentarios] Comentários do YouTube ao vivo (ler + responder + resposta em massa). Reaproveita o OAuth das lives.
+try { db.exec(`ALTER TABLE obs_rota ADD COLUMN canal_id TEXT`); } catch { /* ja existe */ }
+const _ytLiveChatCache: Record<string, { liveChatId: string; ts: number }> = {};
+const _obsCmtBuf: Array<{ id: string; rede: string; canal_id: string; autor: string; texto: string; ts: string }> = [];
+const _obsCmtPage: Record<string, string> = {};
+const _obsCmtSeen: Set<string> = new Set();
+async function _ytFetch(token: string, url: string, init?: any): Promise<any> {
+  const r = await fetch(url, { ...(init || {}), headers: { Authorization: 'Bearer ' + token, ...(init && init.body ? { 'Content-Type': 'application/json' } : {}) } });
+  const t = await r.text(); let j: any = {}; try { j = t ? JSON.parse(t) : {}; } catch { j = { raw: t }; }
+  if (!r.ok) throw new Error('YT ' + r.status + ': ' + String((j && j.error && j.error.message) || t).slice(0, 200));
+  return j;
+}
+async function _ytLiveChatId(canalId: string, token: string): Promise<string> {
+  const c = _ytLiveChatCache[canalId]; if (c && Date.now() - c.ts < 60000) return c.liveChatId;
+  const j = await _ytFetch(token, 'https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet&broadcastStatus=active&broadcastType=all&mine=true&maxResults=1');
+  const lc = (j && j.items && j.items[0] && j.items[0].snippet && j.items[0].snippet.liveChatId) || '';
+  _ytLiveChatCache[canalId] = { liveChatId: lc, ts: Date.now() };
+  return lc;
+}
+async function _obsPollYouTube(): Promise<void> {
+  const rotas = (_obsRotas().filter((r: any) => r.plataforma === 'youtube' && Number(r.ativo) === 1 && r.canal_id)) as any[];
+  const vistos = new Set<string>();
+  for (const r of rotas) {
+    if (vistos.has(r.canal_id)) continue; vistos.add(r.canal_id);
+    try {
+      const token = await pbYtTokenLives(r.canal_id);
+      const lc = await _ytLiveChatId(r.canal_id, token); if (!lc) continue;
+      const pg = _obsCmtPage[lc] ? ('&pageToken=' + encodeURIComponent(_obsCmtPage[lc])) : '';
+      const j = await _ytFetch(token, 'https://www.googleapis.com/youtube/v3/liveChat/messages?part=snippet,authorDetails&liveChatId=' + encodeURIComponent(lc) + '&maxResults=50' + pg);
+      _obsCmtPage[lc] = (j && j.nextPageToken) || _obsCmtPage[lc];
+      for (const it of ((j && j.items) || [])) {
+        const id = 'yt:' + it.id; if (_obsCmtSeen.has(id)) continue; _obsCmtSeen.add(id);
+        _obsCmtBuf.push({ id, rede: 'youtube', canal_id: r.canal_id, autor: (it.authorDetails && it.authorDetails.displayName) || '', texto: (it.snippet && it.snippet.displayMessage) || '', ts: (it.snippet && it.snippet.publishedAt) || agora() });
+      }
+    } catch { /* best-effort por canal */ }
+  }
+  if (_obsCmtBuf.length > 200) _obsCmtBuf.splice(0, _obsCmtBuf.length - 200);
+  if (_obsCmtSeen.size > 2000) _obsCmtSeen.clear();
+}
+app.get('/obs/comentarios', async (_req, res) => {
+  try { await _obsPollYouTube(); } catch { /* */ }
+  const itens = [..._obsCmtBuf].sort((a, b) => (a.ts < b.ts ? 1 : -1)).slice(0, 80);
+  res.json({ ok: true, itens, redesPostar: ['youtube'], nota: 'Facebook/Instagram/TikTok: leitura/resposta em etapa futura.' });
+});
+app.post('/obs/responder', async (req, res) => {
+  try {
+    const b = req.body || {}; const texto = String(b.texto || '').trim(); if (!texto) return res.json({ ok: false, erro: 'texto_vazio' });
+    const alvo = String(b.alvo || 'todas');
+    const rotas = (_obsRotas().filter((r: any) => r.plataforma === 'youtube' && Number(r.ativo) === 1 && r.canal_id)) as any[];
+    const canais = alvo === 'todas' ? Array.from(new Set(rotas.map((r) => r.canal_id))) : [alvo];
+    let n = 0; const erros: string[] = [];
+    for (const canalId of canais) {
+      try {
+        const token = await pbYtTokenLives(String(canalId));
+        const lc = await _ytLiveChatId(String(canalId), token); if (!lc) { erros.push(canalId + ': sem live ativa'); continue; }
+        await _ytFetch(token, 'https://www.googleapis.com/youtube/v3/liveChat/messages?part=snippet', { method: 'POST', body: JSON.stringify({ snippet: { liveChatId: lc, type: 'textMessageEvent', textMessageDetails: { messageText: texto } } }) });
+        n++;
+      } catch (e: any) { erros.push(canalId + ': ' + String(e && e.message || e).slice(0, 80)); }
+    }
+    res.json({ ok: n > 0, enviados: n, erros });
+  } catch (e: any) { res.json({ ok: false, erro: String(e && e.message || e) }); }
+});
+app.get('/obs/canais-youtube', (_req, res) => {
+  try {
+    const rows = db.prepare(`SELECT id, nome, projeto FROM canais_publicacao WHERE ativo=1 ORDER BY projeto, nome`).all() as any[];
+    const out = rows.filter((c) => db.prepare(`SELECT 1 FROM oauth_tokens_pub WHERE canal_id=? AND plataforma IN ('youtube_lives','youtube') LIMIT 1`).get(c.id)).map((c) => ({ canal_id: c.id, nome: c.nome, projeto: c.projeto }));
+    res.json({ ok: true, canais: out });
+  } catch (e: any) { res.json({ ok: false, erro: String(e && e.message || e) }); }
+});
 console.log('[+obs] rotas /obs/* carregadas (ao vivo pelo OBS).');
 
 app.listen(PORT, () => console.log(`[engine] ouvindo na porta ${PORT} — base ${PUBLIC_BASE_URL}`));
