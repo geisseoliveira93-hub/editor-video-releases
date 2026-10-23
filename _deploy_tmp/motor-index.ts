@@ -2120,7 +2120,7 @@ const _TRACK_PAGINA_JS = `(function(){
       }
       var CK=/(guru|lastlink|hotmart|kiwify|eduzz|monetizze|cakto|payt|kirvano|checkout|pay\\.|carrinho|comprar|assinar|inscrever)/i;
       var temCk=false; var as=document.querySelectorAll('a[href]');
-      for(var k=0;k<as.length;k++){ (function(a){ var h=a.getAttribute('href')||''; if(CK.test(h)){ temCk=true; if(a.getAttribute('data-mr-evento')==null) a.addEventListener('click',function(){ track('InitiateCheckout',{content_name:document.title||''}); }); } })(as[k]); }
+      for(var k=0;k<as.length;k++){ (function(a){ var h=a.getAttribute('href')||''; if(CK.test(h)){ temCk=true; if(a.getAttribute('data-mr-evento')==null) a.addEventListener('click',function(){ try{ var _k='_mr_ic_'+(location.pathname||''); var _n=Date.now(); var _l=0; try{ _l=parseInt(sessionStorage.getItem(_k)||localStorage.getItem(_k)||'0',10)||0; }catch(e){} if(_n-_l<1800000) return; try{ sessionStorage.setItem(_k,String(_n)); }catch(e){} try{ localStorage.setItem(_k,String(_n)); }catch(e){} }catch(e){} track('InitiateCheckout',{content_name:document.title||''}); }); } })(as[k]); }
       if(temCk) track('ViewContent',{content_name:document.title||''});
     }catch(e){}
   }
@@ -2799,11 +2799,11 @@ function classificaPagamento(provider: string, statusRaw: string): 'aprovado' | 
 // [etapa31] gancho do CAPI: é preenchido dentro do bloco CAPI (etapa29) no boot.
 // Serve pra espelhar a MESMA venda que chega pela entrega (Guru/LastLink) no pixel Meta,
 // sem precisar criar webhook novo. Fica null até o bloco CAPI rodar no startup.
-let capiHookPagamento: ((fonte: string, dados: { email?: string | null; telefone?: string | null; valorCentavos?: number | null; produto?: string | null; produtoId?: string | null; evento?: string }) => Promise<void>) | null = null;
+let capiHookPagamento: ((fonte: string, dados: { email?: string | null; telefone?: string | null; valorCentavos?: number | null; produto?: string | null; produtoId?: string | null; evento?: string; nome?: string | null; pedido?: string | null }) => Promise<void>) | null = null;
 // [#9 VSL camada2 batch B] gancho de rastreio por MARCO do player de VSL (play/oferta/cta_click ->
 // Meta CAPI + GA4, reusa track_config do projeto). Preenchido no bloco CAPI (etapa29) no boot.
 // Inerte até pubFlag('vsl_capi_ativo')='1'.
-let vslTrackHook: ((projeto: string, eventName: string, dados: { email?: string | null; telefone?: string | null; pagina?: string | null }) => Promise<void>) | null = null;
+let vslTrackHook: ((projeto: string, eventName: string, dados: { email?: string | null; telefone?: string | null; pagina?: string | null; clientIp?: string | null; userAgent?: string | null; fbp?: string | null; fbc?: string | null }) => Promise<void>) | null = null;
 
 app.post('/webhook/payment/:provider', async (req, res) => {
   try {
@@ -2867,6 +2867,7 @@ app.post('/webhook/payment/:provider', async (req, res) => {
           email: p.email, telefone: p.telefone,
           valorCentavos: Math.round(Number(p.valor || 0) * 100),
           produto: p.produtoNome, produtoId: p.produtoId, evento: _capiEv,
+          nome: (p as any).nome || null, pedido: (p as any).pedido || null,
           utms: _utmVenda,
         }).catch(() => {});
       }
@@ -7720,7 +7721,17 @@ console.log('[etapa28] publicador na nuvem carregado (INERTE ate publicador_ativ
       if (projT) {
         const cfgT = trackLer(String(projT));
         if (cfgT && cfgT.ativo !== 0 && (cfgT.meta_pixel_id || cfgT.ga4_mid)) {
-          await trackEnviarTudo(cfgT, eventName, { email: dados.email, telefone: dados.telefone, valorCentavos: dados.valorCentavos, produto: dados.produto, pagina: null, externalId: dados.email || dados.telefone || null, utms: (dados as any).utms || null }, fonte);
+          let _fn: string | null = null, _ln: string | null = null;
+          try { const _nm = String((dados as any).nome || '').trim(); if (_nm) { const _ps = _nm.split(/\s+/); _fn = _ps.shift() || null; _ln = _ps.length ? _ps.join(' ') : null; } } catch { /* nome best-effort */ }
+          let _fbcP: string | null = null;
+          try {
+            const _tel = dados.telefone ? String(dados.telefone).replace(/\D/g, '') : '';
+            let _cc: any = null;
+            if (_tel) _cc = db.prepare(`SELECT utm_fbclid FROM contatos WHERE projeto=? AND telefone=? AND utm_fbclid IS NOT NULL AND utm_fbclid<>'' ORDER BY criado_em DESC LIMIT 1`).get(String(projT), _tel) as any;
+            if ((!_cc || !_cc.utm_fbclid) && dados.email) _cc = db.prepare(`SELECT utm_fbclid FROM contatos WHERE lower(email)=? AND utm_fbclid IS NOT NULL AND utm_fbclid<>'' ORDER BY criado_em DESC LIMIT 1`).get(String(dados.email).toLowerCase()) as any;
+            if (_cc && _cc.utm_fbclid) _fbcP = 'fb.1.' + Date.now() + '.' + String(_cc.utm_fbclid);
+          } catch { /* fbc best-effort */ }
+          await trackEnviarTudo(cfgT, eventName, { email: dados.email, telefone: dados.telefone, valorCentavos: dados.valorCentavos, produto: dados.produto, pagina: null, eventId: (dados as any).pedido || undefined, firstName: _fn, lastName: _ln, fbc: _fbcP, externalId: dados.email || dados.telefone || null, utms: (dados as any).utms || null }, fonte);
           return;
         }
       }
@@ -7752,7 +7763,7 @@ console.log('[etapa28] publicador na nuvem carregado (INERTE ate publicador_ativ
     try {
       const cfgT = trackLer(String(projeto || ''));
       if (cfgT && cfgT.ativo !== 0 && (cfgT.meta_pixel_id || cfgT.ga4_mid)) {
-        await trackEnviarTudo(cfgT, eventName, { email: dados.email || null, telefone: dados.telefone || null, valorCentavos: null, produto: null, pagina: dados.pagina || null }, 'vsl');
+        await trackEnviarTudo(cfgT, eventName, { email: dados.email || null, telefone: dados.telefone || null, valorCentavos: null, produto: null, pagina: dados.pagina || null, clientIp: (dados as any).clientIp || null, userAgent: (dados as any).userAgent || null, fbp: (dados as any).fbp || null, fbc: (dados as any).fbc || null }, 'vsl');
       }
     } catch { /* best-effort: nunca quebra o ingest do player */ }
   };
@@ -10233,7 +10244,9 @@ app.post('/vsl/evento', (req: any, res: any) => {
         if (vv2 && vv2.projeto) {
           let em: string | null = null, tel: string | null = null;
           if (b.contato_id) { try { const ct = db.prepare(`SELECT email, telefone FROM contatos WHERE id=?`).get(String(b.contato_id)) as any; if (ct) { em = ct.email || null; tel = ct.telefone || null; } } catch { /* */ } }
-          vslTrackHook(String(vv2.projeto), evName, { email: em, telefone: tel, pagina: null }).catch(() => { /* */ });
+          const _vip = String((req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || (req.socket && req.socket.remoteAddress) || '');
+          const _vua = String(req.headers['user-agent'] || '');
+          vslTrackHook(String(vv2.projeto), evName, { email: em, telefone: tel, pagina: (b.url || null), clientIp: _vip || null, userAgent: _vua || null, fbp: (b.fbp || null), fbc: (b.fbc || null) }).catch(() => { /* */ });
         }
       }
     } catch { /* capi marco best-effort */ }
