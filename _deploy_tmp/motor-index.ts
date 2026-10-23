@@ -11267,6 +11267,21 @@ label{display:block;font-size:12.5px;color:#aeaeba;margin:12px 0 5px}
 @media(max-width:820px){.layoutaula{grid-template-columns:1fr}.top nav{display:none}}
 html.ac-big body{font-size:17px}html.ac-big .top nav{font-size:16px}html.ac-big .card .nm{font-size:15px}html.ac-big .btn,html.ac-big .pill{font-size:16px}html.ac-big .tree .au{font-size:15px}html.ac-big h1{font-size:clamp(24px,5vw,36px)}
 .adov{position:absolute;inset:0;background:#000;display:flex;flex-direction:column;z-index:5}.adov iframe{flex:1;width:100%;border:0}.adbar{display:flex;align-items:center;gap:10px;padding:10px 12px;background:#0c0c10;border-top:1px solid #1c1c24;font-size:13px;color:#cfcfd8}.adcta{position:absolute;top:12px;right:12px;background:#e7c86a;color:#201a08;padding:8px 14px;border-radius:8px;font-weight:700;font-size:13px}.adfx{position:absolute;left:0;right:0;bottom:0;z-index:6;display:flex;align-items:center;gap:10px;padding:10px 12px;background:#0c0c10e8;border-top:1px solid #e7c86a;font-size:13px}.dmark{position:absolute;right:10px;top:10px;z-index:4;color:#ffffff40;font-size:11px;pointer-events:none;text-shadow:0 1px 2px #0008}.card.locked .nm{color:#8a8a96}.lock .unlock{display:block;font-size:11px;color:#e7c86a;margin-top:4px;font-weight:700}.cattile{flex:0 0 200px;height:96px;border-radius:12px;background:linear-gradient(135deg,#1b1b24,#23232e);border:1px solid #2a2a34;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:17px;color:#e7c86a;text-align:center;padding:0 12px}.cattile:hover{border-color:#e7c86a}.popov{position:fixed;inset:0;z-index:70;background:#000b;display:flex;align-items:center;justify-content:center;padding:18px}.pop{position:relative;background:#15151c;border:1px solid #26262f;border-radius:14px;padding:16px;width:100%}.popx{position:absolute;top:8px;right:8px;width:34px;height:34px;border-radius:50%;border:0;background:#0009;color:#fff;font-size:16px;cursor:pointer;z-index:2}.metp{display:none;position:fixed;right:18px;bottom:120px;z-index:50;background:#15151c;border:1px solid #26262f;border-radius:12px;padding:14px;width:240px;box-shadow:0 12px 30px #0008}
+/* [layout v3 23/10] carrossel do banner + setas das prateleiras + alto-falante */
+.heroC{position:relative;height:300px;overflow:hidden;margin-bottom:10px}
+.hslide{position:absolute;inset:0;opacity:0;transition:opacity .9s;pointer-events:none}
+.hslide.on{opacity:1;pointer-events:auto}
+.hslide .bg{position:absolute;inset:0;background-size:cover;background-position:center;filter:brightness(.55)}
+.hslide .ov{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;padding:0 clamp(20px,6vw,70px);max-width:720px}
+.hdots{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:3}
+.hdot{width:9px;height:9px;border-radius:50%;background:#ffffff40;cursor:pointer}
+.hdot.on{background:#e7c86a}
+.railwrap{position:relative}
+.arw{position:absolute;top:10px;bottom:18px;width:46px;border:0;color:#fff;font-size:26px;cursor:pointer;z-index:4;display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .15s}
+.arw.l{left:0;background:linear-gradient(90deg,#0d0d10,transparent)}
+.arw.r{right:0;background:linear-gradient(270deg,#0d0d10,transparent)}
+.railwrap:hover .arw{opacity:.95}
+.ic.acspk{background:none;font-size:16px}
 `;
 const _acTop = (al: any, aba = ''): string => {
   const ini = esc(String(al && al.nome || 'A').trim().charAt(0).toUpperCase() || 'A');
@@ -11276,8 +11291,8 @@ const _acTop = (al: any, aba = ''): string => {
     <a href="https://api.whatsapp.com/send?phone=5516996401030" target="_blank">Suporte</a>
     <a href="https://melodias-riffs-app.pages.dev/inicio.html?email=${encodeURIComponent(String(al && al.email || ''))}&cuser_fname=${encodeURIComponent(String(al && al.nome || '').trim().split(' ')[0] || '')}" target="_blank">Fale com a IA</a></nav>
     <div class="sp"></div>
-    <div class="ic" title="Aumentar a letra" style="font-weight:800;width:auto;padding:0 10px;border:1px solid #2a2a34" onclick="acBig()">A+</div>
-    <div class="av" onclick="var m=document.getElementById('mn');m.classList.toggle('open')">${ini}
+    <button class="ic acspk" id="acspk" title="Ligar/desligar o som ao passar o mouse" onclick="acSom()">🔊</button>
+    <div class="av" title="Minha conta" onclick="var m=document.getElementById('mn');m.classList.toggle('open')">⚙️
       <div class="menu" id="mn">${impers}
         <a href="/area/perfil">Perfil</a>
         <a href="/area/ranking">Ranking</a>
@@ -11291,7 +11306,7 @@ const _acTop = (al: any, aba = ''): string => {
 };
 const _acPage = (al: any, titulo: string, corpo: string, aba = '', extraHead = ''): string =>
   '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-  + '<title>' + esc(titulo) + ' — Melodias e Riffs</title><link rel="manifest" href="/area/manifest.webmanifest"><meta name="theme-color" content="#0a0a0c"><style>' + _acCSS + '</style>' + extraHead + '<script>function acBig(){try{var h=document.documentElement;h.classList.toggle("ac-big");localStorage.setItem("ac_big",h.classList.contains("ac-big")?"1":"0");}catch(e){}}try{if(localStorage.getItem("ac_big")==="1")document.documentElement.classList.add("ac-big");}catch(e){}if("serviceWorker" in navigator){navigator.serviceWorker.register("/area/sw.js").catch(function(){});}(function(){var AC=null;function mk(){if(!AC){try{AC=new (window.AudioContext||window.webkitAudioContext)();}catch(e){}}if(AC&&AC.state==="suspended")AC.resume();}document.addEventListener("pointerdown",mk);var L=0;document.addEventListener("mouseover",function(e){var c=e.target&&e.target.closest&&e.target.closest(".card,.cattile,.mcard");if(!c||!AC)return;var n=Date.now();if(n-L<90)return;L=n;try{var t=AC.currentTime,o=AC.createOscillator(),g=AC.createGain();o.type="sine";o.frequency.setValueAtTime(820,t);o.frequency.exponentialRampToValueAtTime(1240,t+.05);g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.03,t+.012);g.gain.exponentialRampToValueAtTime(.0001,t+.12);o.connect(g).connect(AC.destination);o.start(t);o.stop(t+.13);}catch(e){}},true);})();</script></head><body>'
+  + '<title>' + esc(titulo) + ' — Melodias e Riffs</title><link rel="manifest" href="/area/manifest.webmanifest"><meta name="theme-color" content="#0a0a0c"><style>' + _acCSS + '</style>' + extraHead + '<script>function acBig(){try{var h=document.documentElement;h.classList.toggle("ac-big");localStorage.setItem("ac_big",h.classList.contains("ac-big")?"1":"0");}catch(e){}}try{if(localStorage.getItem("ac_big")==="1")document.documentElement.classList.add("ac-big");}catch(e){}if("serviceWorker" in navigator){navigator.serviceWorker.register("/area/sw.js").catch(function(){});}function _acSomOn(){try{return localStorage.getItem("ac_som")!=="0";}catch(e){return true;}}window.acSom=function(){try{var off=localStorage.getItem("ac_som")==="0";localStorage.setItem("ac_som",off?"1":"0");var b=document.getElementById("acspk");if(b)b.textContent=off?"\u{1F50A}":"\u{1F507}";}catch(e){}};document.addEventListener("DOMContentLoaded",function(){try{var b=document.getElementById("acspk");if(b)b.textContent=_acSomOn()?"\u{1F50A}":"\u{1F507}";}catch(e){}});(function(){var AC=null;function mk(){if(!AC){try{AC=new (window.AudioContext||window.webkitAudioContext)();}catch(e){}}if(AC&&AC.state==="suspended")AC.resume();}document.addEventListener("pointerdown",mk);var L=0;document.addEventListener("mouseover",function(e){var c=e.target&&e.target.closest&&e.target.closest(".card,.cattile,.mcard");if(!c||!AC||!_acSomOn())return;var n=Date.now();if(n-L<90)return;L=n;try{var t=AC.currentTime,o=AC.createOscillator(),g=AC.createGain();o.type="sine";o.frequency.setValueAtTime(820,t);o.frequency.exponentialRampToValueAtTime(1240,t+.05);g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.03,t+.012);g.gain.exponentialRampToValueAtTime(.0001,t+.12);o.connect(g).connect(AC.destination);o.start(t);o.stop(t+.13);}catch(e){}},true);})();</script></head><body>'
   + _acTop(al, aba) + corpo + '</body></html>';
 
 // ---------- [B.3] Login / magic link / logout ----------
@@ -11342,43 +11357,49 @@ app.get('/area/logout', (req: any, res: any) => {
 });
 
 // ---------- [B.4] HOME do aluno (banner + prateleiras por vitrine) ----------
+// [layout v3 23/10] prateleira com setas de avançar/voltar (+ rotação automática via _acHomeJS)
+function _acRail(inner: string): string {
+  return `<div class="railwrap"><button class="arw l" data-d="-1" aria-label="voltar">‹</button><div class="rail auto">${inner}</div><button class="arw r" data-d="1" aria-label="avançar">›</button></div>`;
+}
+// [layout v3 23/10] JS da home: setas das prateleiras + rotação automática lenta + carrossel do banner
+function _acHomeJS(): string {
+  return `<script>(function(){
+    document.querySelectorAll('.arw').forEach(function(b){b.addEventListener('click',function(){var r=b.parentElement.querySelector('.rail');if(r)r.scrollBy({left:(Number(b.getAttribute('data-d'))||1)*330,behavior:'smooth'});});});
+    document.querySelectorAll('.rail.auto').forEach(function(r){setInterval(function(){if(r.matches(':hover'))return;if(r.scrollLeft+r.clientWidth>=r.scrollWidth-4){r.scrollTo({left:0,behavior:'smooth'});}else{r.scrollBy({left:168,behavior:'smooth'});}},4000);});
+    var h=document.getElementById('heroC');if(h){var sl=h.querySelectorAll('.hslide'),dt=h.querySelectorAll('.hdot'),c=0,itv=(Number(h.getAttribute('data-itv'))||6)*1000;function go(i){sl[c].classList.remove('on');if(dt[c])dt[c].classList.remove('on');c=i;sl[c].classList.add('on');if(dt[c])dt[c].classList.add('on');}dt.forEach(function(d,i){d.addEventListener('click',function(){go(i);});});if(sl.length>1)setInterval(function(){go((c+1)%sl.length);},itv);}
+  })();</script>`;
+}
 app.get(['/area', '/area/vitrine/home'], (req: any, res: any) => {
   const al = _acAluno(req);
   if (!al) return res.redirect('/area/login');
   _acMarcarAcesso(al);
   try {
     const meus = _acCursosDoAluno(al.id);
-    const banner = db.prepare(`SELECT * FROM academy_banners WHERE status='publicado' AND (tipo IS NULL OR tipo='' OR tipo='hero') ORDER BY ordem LIMIT 1`).get() as any;
+    // [banner v3 23/10] carrossel: TODOS os banners hero publicados que o aluno QUALIFICA (segmentado por _acPublicoOk), com intervalo configurável (pub_kv academy_banner_intervalo).
+    const _bannersHero = db.prepare(`SELECT * FROM academy_banners WHERE status='publicado' AND (tipo IS NULL OR tipo='' OR tipo='hero') ORDER BY ordem`).all() as any[];
     const vitrines = db.prepare(`SELECT * FROM academy_vitrines ORDER BY ordem, nome`).all() as any[];
     const cursos = db.prepare(`SELECT * FROM academy_cursos ORDER BY ordem, criado_em`).all() as any[];
     // progresso p/ barra do card
     const prog = db.prepare(`SELECT curso_id, AVG(pct) p FROM academy_progresso WHERE aluno_id=? GROUP BY curso_id`).all(al.id) as any[];
     const pmap: any = {}; for (const r of prog) pmap[r.curso_id] = Math.round(r.p || 0);
 
+    const _bannersOk = _bannersHero.filter((b: any) => { try { return _acPublicoOk(al, b.alvo_publico, b.alvo_tag, b.produto_alvo, meus); } catch { return true; } });
+    const _bItv = Math.max(2, Number(pubFlag('academy_banner_intervalo', '6')) || 6);
     let hero = '';
-    if (banner) {
-      hero = `<div class="hero"><div class="bg" style="background-image:url('${esc(banner.imagem || '')}')"></div>
-        <div class="ov"><h1>${esc(banner.nome || '')}</h1>${banner.link ? `<div style="margin-top:14px"><a class="btn btn-g" href="${esc(banner.link)}" target="_blank">Saber mais</a></div>` : ''}</div></div>`;
+    if (_bannersOk.length) {
+      const _slides = _bannersOk.map((b: any, i: number) => `<div class="hslide${i === 0 ? ' on' : ''}"><div class="bg" style="background-image:url('${esc(b.imagem || '')}')"></div>
+        <div class="ov"><h1>${esc(b.nome || '')}</h1>${b.link ? `<div style="margin-top:14px"><a class="btn btn-g" href="${esc(b.link)}" target="_blank">Saber mais</a></div>` : ''}</div></div>`).join('');
+      const _hdots = _bannersOk.length > 1 ? `<div class="hdots">${_bannersOk.map((_b: any, i: number) => `<span class="hdot${i === 0 ? ' on' : ''}"></span>`).join('')}</div>` : '';
+      hero = `<div class="heroC" id="heroC" data-itv="${_bItv}">${_slides}${_hdots}</div>`;
     }
     const cardHtml = (c: any): string => _acCardCurso(c, meus, pmap);
-    const emAndamento = cursos.filter((c) => meus.has(c.id) && (pmap[c.id] || 0) > 0 && (pmap[c.id] || 0) < 100);
-    const cats: string[] = []; for (const v of vitrines) { const ct = String(v.categoria || '').trim(); if (ct && !cats.includes(ct)) cats.push(ct); }
     let shelves = '';
-    // [Ezequias 21/10: "Continuar assistindo" NAO fica na home — fica DENTRO do curso. Removido da home:]
-    // if (emAndamento.length) shelves += `<div class="shelf"><h2>Continuar assistindo</h2><div class="rail">${emAndamento.map(cardHtml).join('')}</div></div>`;
     const novos = cursos.filter((c) => c.criado_em && c.criado_em >= new Date(Date.now() - 30 * 864e5).toISOString());
-    if (novos.length) shelves += `<div class="shelf"><h2>✨ Novidades</h2><div class="rail">${novos.map(cardHtml).join('')}</div></div>`;
-    const _catMeta = _acCatMeta();
-    // [layout 23/10 Ezequias] faixa "Categorias" (tiles) REMOVIDA da home — fica igual à Cademí: prateleiras por instrumento DIRETO.
-    //   Código antigo preservado (não apagar):
-    //   if (cats.length) shelves += `<div class="shelf"><h2>Categorias</h2><div class="rail">` + cats.map((ct) => _acCatTile(ct, _catMeta)).join('') + `</div></div>`;
-    //   for (const v of vitrines) {
-    //     if (cats.length && String(v.categoria || '').trim()) continue; // categorizadas iam pra /area/categoria
-    //     const doV = cursos.filter((c) => c.vitrine_id === v.id);
-    //     if (!doV.length) continue;
-    //     shelves += `<div class="shelf"><h2>${esc(v.nome || '')}</h2><div class="rail">${doV.map(cardHtml).join('')}</div></div>`;
-    //   }
-    // AGORA: TODAS as vitrines viram prateleira na home; "E-books e Cifras" vai no TOPO (depois de Novidades).
+    if (novos.length) shelves += `<div class="shelf"><h2>✨ Novidades</h2>${_acRail(novos.map(cardHtml).join(''))}</div>`;
+    // [layout v3 23/10 Ezequias] FILTRADO POR ALUNO (menos poluído):
+    //  - "E-books e Cifras" SEMPRE aparece COMPLETA (vitrine dos low-tickets, oferta p/ todo mundo).
+    //  - as outras vitrines (instrumentos) só aparecem se o aluno TEM curso nelas, e mostram SÓ os cursos que ele tem.
+    // (as versões antigas — faixa "Categorias" e "todas as vitrines" — ficam preservadas no backup/MANIFEST.)
     const _ordVit = vitrines.slice().sort((a: any, b: any) => {
       const ea = /e-?books?/i.test(String(a.nome || '') + ' ' + String(a.categoria || '')) ? 0 : 1;
       const eb = /e-?books?/i.test(String(b.nome || '') + ' ' + String(b.categoria || '')) ? 0 : 1;
@@ -11386,16 +11407,16 @@ app.get(['/area', '/area/vitrine/home'], (req: any, res: any) => {
       return (Number(a.ordem || 0) - Number(b.ordem || 0)) || String(a.nome || '').localeCompare(String(b.nome || ''));
     });
     for (const v of _ordVit) {
-      const doV = cursos.filter((c) => c.vitrine_id === v.id);
+      const ehEbooks = /e-?books?/i.test(String(v.nome || '') + ' ' + String(v.categoria || ''));
+      let doV = cursos.filter((c) => c.vitrine_id === v.id);
+      if (!ehEbooks) { const meusV = doV.filter((c) => meus.has(c.id)); if (!meusV.length) continue; doV = meusV; }
       if (!doV.length) continue;
-      shelves += `<div class="shelf"><h2>${esc(v.nome || '')}</h2><div class="rail">${doV.map(cardHtml).join('')}</div></div>`;
+      shelves += `<div class="shelf"><h2>${esc(v.nome || '')}</h2>${_acRail(doV.map(cardHtml).join(''))}</div>`;
     }
-    const semVit = cursos.filter((c) => !c.vitrine_id);
-    if (semVit.length) shelves += `<div class="shelf"><h2>Cursos</h2><div class="rail">${semVit.map(cardHtml).join('')}</div></div>`;
+    const semVit = cursos.filter((c) => !c.vitrine_id && meus.has(c.id));
+    if (semVit.length) shelves += `<div class="shelf"><h2>Meus cursos</h2>${_acRail(semVit.map(cardHtml).join(''))}</div>`;
     if (!shelves) shelves = `<div class="card2" style="margin-top:24px;text-align:center;color:#8a8a96">Seus cursos aparecerão aqui.</div>`;
-    // [layout 23/10] sonzinho curto ao passar o mouse no card (Web Audio; o navegador libera o som após o 1º clique). O zoom no hover já está no CSS (.card:hover .pz).
-    const _somHover = `<script>(function(){var ac=null,last=0;function arm(){if(ac)return;try{var AC=window.AudioContext||window.webkitAudioContext;ac=new AC();}catch(e){}}window.addEventListener('pointerdown',arm);function tick(){if(!ac)return;var now=Date.now();if(now-last<60)return;last=now;try{var o=ac.createOscillator(),g=ac.createGain();o.type='sine';o.frequency.setValueAtTime(1150,ac.currentTime);o.connect(g);g.connect(ac.destination);var t=ac.currentTime;g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(0.05,t+0.008);g.gain.exponentialRampToValueAtTime(0.0001,t+0.1);o.start(t);o.stop(t+0.11);}catch(e){}}document.querySelectorAll('.card').forEach(function(c){c.addEventListener('mouseenter',tick);});})();</script>`;
-    const corpo = hero + `<div class="wrap">` + shelves + `</div>` + _acPopupHtml(al) + _somHover;
+    const corpo = hero + `<div class="wrap">` + shelves + `</div>` + _acPopupHtml(al) + _acHomeJS();
     res.type('html').send(_acPage(al, 'Início', corpo, 'home'));
   } catch (e: any) { res.status(500).type('html').send('<pre>' + esc(String(e && e.message || e)) + '</pre>'); }
 });
@@ -12364,6 +12385,9 @@ const _acCatTile = (ct: string, meta: any): string => {
 };
 // ADMIN: salvar imagem/ordem de uma categoria
 app.post('/academy/categoria', (req: any, res: any) => { try { const b = req.body || {}; db.prepare(`INSERT INTO academy_categorias (nome,imagem,ordem) VALUES (?,?,?) ON CONFLICT(nome) DO UPDATE SET imagem=excluded.imagem, ordem=excluded.ordem`).run(b.nome, b.imagem || '', Number(b.ordem || 0)); _ndOk(res, { ok: true }); } catch (e) { _ndErr(res, e); } });
+// [banner v3 23/10] intervalo (segundos) do carrossel de banner da home — pub_kv (persiste em deploy). Qtde de imagens = quantos banners hero publicados; "pra quem" = segmentação já existente do banner (alvo_publico/alvo_tag/produto_alvo).
+app.get('/academy/banner-config', (_req: any, res: any) => { try { _ndOk(res, { intervalo: Math.max(2, Number(pubFlag('academy_banner_intervalo', '6')) || 6) }); } catch (e) { _ndErr(res, e); } });
+app.post('/academy/banner-config', (req: any, res: any) => { try { const b = req.body || {}; const itv = Math.max(2, Math.min(120, Number(b.intervalo) || 6)); setPubFlag('academy_banner_intervalo', String(itv)); _ndOk(res, { intervalo: itv }); } catch (e) { _ndErr(res, e); } });
 
 // ---------- [B.11] ENTREGA AUTOMÁTICA NA VENDA (webhook compra → matrícula na Academy) ----------
 db.exec(`CREATE TABLE IF NOT EXISTS academy_produto_curso ( id TEXT PRIMARY KEY, match TEXT, curso_id TEXT, validade TEXT, criado_em TEXT )`);
